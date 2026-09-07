@@ -1,0 +1,22 @@
+# ── Base kustomization ────────────────────────────────────────────
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: myapp
+
+resources:
+  - namespace.yaml
+  - app/deployment.yaml
+  - app/service.yaml
+  - app/hpa.yaml
+  - app/pdb.yaml
+  - database/secret.yaml
+  - database/configmap.yaml
+  - redis/deployment.yaml
+  - redis/service.yaml
+  - ingress/ingress.yaml
+  - monitoring/servicemonitor.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: myapp
+  app.kubernetes.io/managed-by: kustomize

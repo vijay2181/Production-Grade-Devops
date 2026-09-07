@@ -1,0 +1,17 @@
+# ── Production overlay ────────────────────────────────────────────
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: myapp
+
+# Patch — bump replicas, tighten resources for prod
+patches:
+  - path: patch-deployment.yaml
+
+# Replace image tag from CI
+images:
+  - name: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+    newTag: "v1.2.3"    # overridden by CI: kustomize edit set image ...

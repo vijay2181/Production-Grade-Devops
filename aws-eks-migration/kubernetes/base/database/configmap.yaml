@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: myapp
+data:
+  # RDS endpoint (set via Terraform output)
+  DB_HOST: "myapp-rds.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+  DB_NAME: "myapp"
+  # ElastiCache endpoint
+  REDIS_HOST: "myapp-redis.xxxxxx.cache.amazonaws.com"

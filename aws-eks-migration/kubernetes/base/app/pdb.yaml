@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-pdb
+  namespace: myapp
+spec:
+  minAvailable: 2       # at least 2 pods alive during node drain / rolling update
+  selector:
+    matchLabels:
+      app: api

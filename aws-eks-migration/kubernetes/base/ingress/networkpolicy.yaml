@@ -1,0 +1,58 @@
+# ── NetworkPolicy ─────────────────────────────────────────────────
+# Only allow traffic from ingress controller → api → redis/db
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-netpol
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Allow ALB controller (runs in kube-system or its own NS)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # Allow outbound to postgres (RDS) on 5432
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # Allow outbound to redis on 6379
+    - ports:
+        - protocol: TCP
+          port: 6379
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-netpol
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - protocol: TCP
+          port: 6379

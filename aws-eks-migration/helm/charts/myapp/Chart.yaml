@@ -1,0 +1,14 @@
+apiVersion: v2
+name: myapp
+description: Production Node.js API — Helm chart for AWS EKS
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - nodejs
+  - api
+  - eks
+home: https://github.com/your-org/myapp
+maintainers:
+  - name: platform-team
+    email: platform@myapp.com

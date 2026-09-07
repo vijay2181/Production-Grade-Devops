@@ -1,0 +1,17 @@
+{
+  "name": "myapp-api",
+  "version": "1.0.0",
+  "description": "Sample Node.js API for docker-compose → EKS migration demo",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "ioredis": "^5.3.2",
+    "prom-client": "^15.1.0",
+    "morgan": "^1.10.0"
+  }
+}

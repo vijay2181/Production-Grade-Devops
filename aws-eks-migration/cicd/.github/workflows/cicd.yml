@@ -1,0 +1,249 @@
+# ============================================================
+# CI/CD Pipeline: GitHub Actions → ECR → EKS
+#
+# Triggers:
+#   - push to main  → deploy to production
+#   - push to develop → deploy to dev
+#   - PRs          → build + test only (no deploy)
+#
+# Required GitHub Secrets:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#   AWS_ACCOUNT_ID
+#   AWS_REGION                  (default us-east-1)
+#   KUBE_CONFIG_DATA_PROD       (base64 kubeconfig for prod cluster)
+#   KUBE_CONFIG_DATA_DEV        (base64 kubeconfig for dev cluster)
+#   SLACK_WEBHOOK_URL           (optional alerts)
+# ============================================================
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION:      ${{ secrets.AWS_REGION || 'us-east-1' }}
+  ECR_REGISTRY:    ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION || 'us-east-1' }}.amazonaws.com
+  IMAGE_NAME:      myapp/api
+  HELM_CHART_PATH: helm/charts/myapp
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # 1. Test
+  # ──────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: Lint
+        run: npm run lint --if-present
+        working-directory: app
+
+      - name: Unit tests
+        run: npm test --if-present
+        working-directory: app
+
+  # ──────────────────────────────────────────────────────────
+  # 2. Build & Push Docker image to ECR
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image tag
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAG="v$(date +%Y%m%d)-${SHORT_SHA}"
+          else
+            TAG="dev-${SHORT_SHA}"
+          fi
+          echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Tag: ${TAG}"
+
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ steps.meta.outputs.image_tag }}
+        run: |
+          docker build \
+            --file app/Dockerfile \
+            --tag $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$IMAGE_NAME:latest \
+            --cache-from $ECR_REGISTRY/$IMAGE_NAME:latest \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            app/
+
+          docker push $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+
+  # ──────────────────────────────────────────────────────────
+  # 3. Deploy to Dev (develop branch only)
+  # ──────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → Dev
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: development
+      url: https://dev-api.myapp.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA_DEV }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy via Helm
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          helm upgrade --install myapp ${{ env.HELM_CHART_PATH }} \
+            --namespace myapp-dev \
+            --create-namespace \
+            --set image.tag=${IMAGE_TAG} \
+            --set replicaCount=1 \
+            --values helm/charts/myapp/values.yaml \
+            --wait \
+            --timeout 5m \
+            --atomic
+
+  # ──────────────────────────────────────────────────────────
+  # 4. Deploy to Production (main branch only)
+  # ──────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://api.myapp.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig (prod)
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA_PROD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy via Helm (rolling update, zero-downtime)
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        run: |
+          helm upgrade --install myapp ${{ env.HELM_CHART_PATH }} \
+            --namespace myapp \
+            --create-namespace \
+            --set image.repository=${ECR_REGISTRY}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${IMAGE_TAG} \
+            --values helm/charts/myapp/values.yaml \
+            --wait \
+            --timeout 10m \
+            --atomic
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/myapp-myapp \
+            --namespace myapp \
+            --timeout=5m
+
+      - name: Smoke test
+        run: |
+          ALB_DNS=$(kubectl get ingress myapp-myapp -n myapp \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          curl -sf --retry 5 --retry-delay 10 https://${ALB_DNS}/health
+
+      - name: Notify Slack on success
+        if: success()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            -d '{"text":"✅ myapp deployed to production: ${{ needs.build.outputs.image_tag }}"}'
+
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            -d '{"text":"🚨 myapp DEPLOYMENT FAILED on main branch: ${{ needs.build.outputs.image_tag }}"}'

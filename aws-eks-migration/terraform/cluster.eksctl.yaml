@@ -1,0 +1,114 @@
+# ============================================================
+# EKS Cluster — eksctl ClusterConfig
+# Usage: eksctl create cluster -f cluster.yaml
+# ============================================================
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: myapp-prod
+  region: us-east-1
+  version: "1.29"
+  tags:
+    project: myapp
+    environment: production
+    managed-by: eksctl
+
+# ── IAM OIDC for service accounts (IRSA) ─────────────────────
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata:
+        name: aws-load-balancer-controller
+        namespace: kube-system
+      wellKnownPolicies:
+        awsLoadBalancerController: true
+    - metadata:
+        name: cluster-autoscaler
+        namespace: kube-system
+      wellKnownPolicies:
+        autoScaler: true
+    - metadata:
+        name: ebs-csi-controller-sa
+        namespace: kube-system
+      wellKnownPolicies:
+        ebsCSIController: true
+    - metadata:
+        name: external-secrets
+        namespace: external-secrets
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+
+# ── VPC ───────────────────────────────────────────────────────
+vpc:
+  cidr: "10.0.0.0/16"
+  nat:
+    gateway: HighlyAvailable   # one NAT per AZ
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+
+# ── Managed Node Groups ───────────────────────────────────────
+managedNodeGroups:
+  # ── System / infra nodes ─────────────────────────────────────
+  - name: system
+    instanceType: t3.medium
+    minSize: 2
+    maxSize: 4
+    desiredCapacity: 2
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    labels:
+      role: system
+    taints:
+      - key: dedicated
+        value: system
+        effect: NoSchedule
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-prod: "owned"
+
+  # ── Application nodes ─────────────────────────────────────────
+  - name: app
+    instanceType: t3.large
+    minSize: 3
+    maxSize: 20
+    desiredCapacity: 3
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    labels:
+      role: app
+    iam:
+      withAddonPolicies:
+        imageBuilder: true
+        cloudWatch: true
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-prod: "owned"
+
+# ── Add-ons ───────────────────────────────────────────────────
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      ebsCSIController: true
+
+# ── CloudWatch logging ────────────────────────────────────────
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
+      - controllerManager
+      - scheduler

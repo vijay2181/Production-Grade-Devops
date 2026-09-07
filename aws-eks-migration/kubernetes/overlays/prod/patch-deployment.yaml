@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: myapp
+spec:
+  replicas: 5   # prod: more replicas
+  template:
+    spec:
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"

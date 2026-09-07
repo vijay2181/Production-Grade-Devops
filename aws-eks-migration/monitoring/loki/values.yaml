@@ -1,0 +1,40 @@
+# Loki + Promtail values
+loki:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 50Gi
+  config:
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v12
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: 720h  # 30 days
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+
+promtail:
+  enabled: true
+  config:
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+    snippets:
+      pipelineStages:
+        - docker: {}
+        - match:
+            selector: '{app="api"}'
+            stages:
+              - json:
+                  expressions:
+                    level: level
+                    msg: msg
+                    ts: ts
+              - labels:
+                  level:

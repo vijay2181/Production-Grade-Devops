@@ -1,0 +1,72 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "MyApp API Dashboard",
+  "uid": "myapp-api",
+  "version": 1,
+  "schemaVersion": 38,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(http_requests_total[1m])) by (status)",
+        "legendFormat": "{{status}}"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "p50 / p95 / p99 Latency",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Error Rate (%)",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 8, "w": 6, "h": 6 },
+      "targets": [{
+        "expr": "100 * sum(rate(http_requests_total{status=~'5..'}[5m])) / sum(rate(http_requests_total[5m]))"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": {
+        "steps": [{ "color": "green", "value": 0 }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }]
+      }}}
+    },
+    {
+      "id": 4,
+      "title": "Pod Count",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 8, "w": 6, "h": 6 },
+      "targets": [{ "expr": "count(kube_pod_status_ready{namespace='myapp', condition='true'})" }]
+    },
+    {
+      "id": 5,
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(container_cpu_usage_seconds_total{namespace='myapp', container='api'}[1m])) by (pod)",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(container_memory_working_set_bytes{namespace='myapp', container='api'}) by (pod)",
+        "legendFormat": "{{pod}}"
+      }]
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+# ── Default values — override per environment ─────────────────────
+replicaCount: 3
+
+image:
+  repository: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+  tag: "latest"
+  pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Service ───────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+# ── Ingress ───────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: alb
+  host: api.myapp.com
+  certArn: "arn:aws:acm:us-east-1:123456789:certificate/xxxxx"
+  wafArn: ""
+
+# ── Resources ─────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# ── HPA ───────────────────────────────────────────────────────────
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 70
+
+# ── PDB ───────────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# ── Environment ───────────────────────────────────────────────────
+env:
+  NODE_ENV: production
+  PORT: "3000"
+  DB_PORT: "5432"
+  REDIS_PORT: "6379"
+
+config:
+  DB_HOST: "myapp-rds.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+  DB_NAME: "myapp"
+  REDIS_HOST: "myapp-redis.xxxxxx.cache.amazonaws.com"
+
+# ── Secrets (names of existing k8s secrets) ──────────────────────
+existingSecret:
+  name: db-credentials
+  dbUserKey: DB_USER
+  dbPasswordKey: DB_PASSWORD
+
+# ── Probes ────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# ── Security ──────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# ── Topology spread (AZ-aware) ────────────────────────────────────
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+
+# ── ServiceMonitor for Prometheus ────────────────────────────────
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  path: /metrics
+
+# ── Node selector + tolerations ──────────────────────────────────
+nodeSelector:
+  role: app
+
+tolerations: []
+
+affinity: {}

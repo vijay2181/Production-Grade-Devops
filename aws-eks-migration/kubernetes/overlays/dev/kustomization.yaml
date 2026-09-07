@@ -1,0 +1,15 @@
+# ── Dev overlay ───────────────────────────────────────────────────
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: myapp-dev
+
+patches:
+  - path: patch-deployment.yaml
+
+images:
+  - name: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+    newTag: "dev"
