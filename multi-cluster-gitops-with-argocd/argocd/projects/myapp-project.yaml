@@ -1,0 +1,90 @@
+# ── AppProject: myapp ─────────────────────────────────────────────
+# AppProjects define:
+#   - Which Git repos are allowed as sources
+#   - Which clusters/namespaces are allowed as destinations
+#   - Which Kubernetes resources can be deployed
+#   - Sync windows (blackout periods)
+#   - Who has RBAC access (referenced in argocd-rbac-cm)
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: myapp
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "MyApp — all environments"
+
+  # ── Allowed source repositories ────────────────────────────────
+  sourceRepos:
+    - https://github.com/your-org/myapp
+    - https://charts.bitnami.com/bitnami    # allow bitnami helm charts
+
+  # ── Allowed destinations ───────────────────────────────────────
+  destinations:
+    - server: https://dev-cluster.example.com
+      namespace: myapp-dev
+    - server: https://staging-cluster.example.com
+      namespace: myapp-staging
+    - server: https://prod-cluster.example.com
+      namespace: myapp-prod
+
+  # ── Allowed Kubernetes resource types ─────────────────────────
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  # ── Deny list — prevent dangerous resources ────────────────────
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota   # only platform team manages quotas
+
+  # ── Sync windows ───────────────────────────────────────────────
+  syncWindows:
+    # Allow deploys to dev any time
+    - kind: allow
+      schedule: "* * * * *"
+      duration: 24h
+      applications:
+        - "*"
+      clusters:
+        - https://dev-cluster.example.com
+      namespaces:
+        - myapp-dev
+
+    # Allow staging deploys Mon-Fri 6am-8pm
+    - kind: allow
+      schedule: "0 6 * * 1-5"
+      duration: 14h
+      applications:
+        - "*"
+      clusters:
+        - https://staging-cluster.example.com
+
+    # Allow prod deploys Mon-Fri 9am-5pm only
+    - kind: allow
+      schedule: "0 9 * * 1-5"
+      duration: 8h
+      applications:
+        - "*"
+      clusters:
+        - https://prod-cluster.example.com
+
+  # ── Roles ──────────────────────────────────────────────────────
+  roles:
+    - name: dev-deployer
+      description: Can deploy to dev
+      policies:
+        - p, proj:myapp:dev-deployer, applications, sync, myapp/*, allow
+      groups:
+        - myorg:backend
+    - name: release-manager
+      description: Can deploy to all environments
+      policies:
+        - p, proj:myapp:release-manager, applications, sync, myapp/*, allow
+        - p, proj:myapp:release-manager, applications, delete, myapp/*, allow
+      groups:
+        - myorg:platform

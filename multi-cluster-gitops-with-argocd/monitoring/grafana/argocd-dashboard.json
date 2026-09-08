@@ -1,0 +1,61 @@
+{
+  "title": "ArgoCD — Multi-Cluster Overview",
+  "uid": "argocd-multicluster",
+  "version": 1,
+  "schemaVersion": 38,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Applications by Sync Status",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [{
+        "expr": "sum by (sync_status) (argocd_app_info)",
+        "legendFormat": "{{sync_status}}"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Applications by Health Status",
+      "type": "piechart",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [{
+        "expr": "sum by (health_status) (argocd_app_info)",
+        "legendFormat": "{{health_status}}"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Sync Operations (last 1h)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(argocd_app_sync_total{phase='Succeeded'}[5m]))", "legendFormat": "Succeeded" },
+        { "expr": "sum(rate(argocd_app_sync_total{phase='Failed'}[5m]))",    "legendFormat": "Failed" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Out-of-Sync Apps",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "targets": [{
+        "expr": "argocd_app_info{sync_status='OutOfSync'}",
+        "legendFormat": "{{name}} / {{dest_namespace}} / {{project}}"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Rollout Status",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rollout_info{phase='Progressing'}", "legendFormat": "Progressing — {{name}}" },
+        { "expr": "rollout_info{phase='Degraded'}",    "legendFormat": "Degraded — {{name}}" },
+        { "expr": "rollout_info{phase='Paused'}",      "legendFormat": "Paused — {{name}}" }
+      ]
+    }
+  ]
+}

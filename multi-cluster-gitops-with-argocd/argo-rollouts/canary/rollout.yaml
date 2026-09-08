@@ -1,0 +1,183 @@
+# ── Canary Rollout ────────────────────────────────────────────────
+#
+# HOW IT WORKS:
+#   Step 1: Deploy new version to 10% of pods
+#   Step 2: Run AnalysisRun — query Prometheus for error rate + latency
+#   Step 3: If metrics OK → promote to 50%
+#   Step 4: Run AnalysisRun again
+#   Step 5: If metrics OK → promote to 100% (full rollout)
+#   Step 6: If ANY analysis fails → auto rollback to stable version
+#
+# REPLACES: apps/v1 Deployment (Argo Rollouts manages pods instead)
+# REQUIRES: Argo Rollouts controller + kubectl-argo-rollouts plugin
+#
+# Real companies using this pattern: Netflix, Intuit, Adobe, Grab
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: myapp-api
+  namespace: myapp-prod
+  labels:
+    app: api
+spec:
+  replicas: 5
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "3000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: api
+                topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api:v1.0.0
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DB_HOST
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_PASSWORD
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_HOST
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+  # ── Canary Strategy ───────────────────────────────────────────
+  strategy:
+    canary:
+      # The canary service receives canary-weight % of traffic
+      canaryService: myapp-api-canary
+      stableService: myapp-api-stable
+
+      # ALB-based traffic splitting (weight-based, not pod-count-based)
+      # This is more accurate than just changing replica counts
+      trafficRouting:
+        alb:
+          ingress: myapp-api-ingress
+          servicePort: 80
+          annotationPrefix: alb.ingress.kubernetes.io
+
+      # ── Promotion steps ────────────────────────────────────────
+      steps:
+        # Step 1: Send 10% traffic to canary
+        - setWeight: 10
+        # Step 2: Pause for manual inspection (or remove for full automation)
+        - pause:
+            duration: 2m
+        # Step 3: Run automated Prometheus analysis
+        - analysis:
+            templates:
+              - templateName: api-success-rate
+              - templateName: api-latency-p95
+            args:
+              - name: service-name
+                value: myapp-api-canary
+        # Step 4: Increase to 50%
+        - setWeight: 50
+        - pause:
+            duration: 2m
+        # Step 5: Run analysis again at 50%
+        - analysis:
+            templates:
+              - templateName: api-success-rate
+              - templateName: api-latency-p95
+            args:
+              - name: service-name
+                value: myapp-api-canary
+        # Step 6: Promote to 100% (full rollout)
+        - setWeight: 100
+
+      # ── Anti-affinity: canary pods on different nodes ──────────
+      canaryMetadata:
+        labels:
+          version: canary
+      stableMetadata:
+        labels:
+          version: stable
+
+      # ── Max pods unavailable during rollout ────────────────────
+      maxUnavailable: 0
+      maxSurge: "20%"

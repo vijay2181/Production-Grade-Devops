@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: myapp-staging
+
+patches:
+  - path: patch.yaml
+
+images:
+  - name: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+    newTag: staging
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - DB_HOST=myapp-staging-rds.xxxx.us-east-1.rds.amazonaws.com
+      - DB_NAME=myapp_staging
+      - REDIS_HOST=myapp-staging-redis.xxxx.cache.amazonaws.com

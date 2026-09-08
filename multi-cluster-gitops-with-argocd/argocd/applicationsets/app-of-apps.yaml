@@ -1,0 +1,29 @@
+# ── App of Apps — root Application ───────────────────────────────
+# This is the ONLY thing you manually apply to ArgoCD.
+# It then deploys ALL other Applications automatically.
+# Pattern: "App of Apps"
+#
+# Apply with:
+#   kubectl apply -f argocd/applicationsets/app-of-apps.yaml -n argocd
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/myapp
+    targetRevision: main
+    path: argocd/applicationsets    # deploys everything in this folder
+  destination:
+    server: https://kubernetes.default.svc   # hub cluster itself
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

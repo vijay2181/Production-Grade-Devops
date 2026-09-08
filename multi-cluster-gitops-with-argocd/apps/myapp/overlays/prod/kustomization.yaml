@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: myapp-prod
+
+patches:
+  - path: patch.yaml
+
+# Image Updater writes back here after detecting a new semver tag in ECR
+images:
+  - name: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+    newTag: v1.0.0   # managed by argocd-image-updater — do not edit manually
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - DB_HOST=myapp-prod-rds.xxxx.us-east-1.rds.amazonaws.com
+      - DB_NAME=myapp
+      - REDIS_HOST=myapp-prod-redis.xxxx.cache.amazonaws.com

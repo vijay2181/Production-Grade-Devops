@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 5      # prod: 5 replicas across 3 AZs
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: LOG_LEVEL
+              value: warn
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"

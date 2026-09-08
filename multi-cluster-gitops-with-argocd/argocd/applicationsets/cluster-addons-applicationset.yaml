@@ -1,0 +1,44 @@
+# ── ApplicationSet: infrastructure addons ─────────────────────────
+# Deploys cluster addons to ALL clusters:
+#   - metrics-server
+#   - aws-load-balancer-controller
+#   - external-secrets-operator
+#   - kube-prometheus-stack
+#
+# This is how you manage cluster infrastructure as GitOps.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-addons
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: dev
+            url:     https://dev-cluster.example.com
+          - cluster: staging
+            url:     https://staging-cluster.example.com
+          - cluster: prod
+            url:     https://prod-cluster.example.com
+
+  template:
+    metadata:
+      name: "addons-{{cluster}}"
+      namespace: argocd
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/your-org/myapp
+        targetRevision: main
+        path: "argocd/addons/{{cluster}}"
+      destination:
+        server: "{{url}}"
+        namespace: kube-system
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true   # required for CRDs

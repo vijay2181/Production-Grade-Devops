@@ -1,0 +1,57 @@
+# ── ArgoCD metrics + Grafana dashboard values ─────────────────────
+# Add these annotations to the ArgoCD Application to enable notifications:
+#
+#   notifications.argoproj.io/subscribe.on-deployed.slack: "#deployments"
+#   notifications.argoproj.io/subscribe.on-sync-failed.slack: "#alerts-prod"
+#   notifications.argoproj.io/subscribe.on-health-degraded.slack: "#alerts-prod"
+
+# kube-prometheus-stack values — additional scrape for ArgoCD
+prometheus:
+  prometheusSpec:
+    additionalScrapeConfigs:
+      - job_name: argocd
+        static_configs:
+          - targets:
+              - argocd-metrics.argocd.svc:8082
+              - argocd-server-metrics.argocd.svc:8083
+              - argocd-repo-server.argocd.svc:8084
+        metrics_path: /metrics
+
+    # ArgoCD alert rules
+    additionalPrometheusRulesMap:
+      argocd-rules:
+        groups:
+          - name: argocd
+            rules:
+              - alert: ArgoCDAppOutOfSync
+                expr: argocd_app_info{sync_status="OutOfSync"} == 1
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "ArgoCD app {{ $labels.name }} is OutOfSync for 15 minutes"
+                  description: "App {{ $labels.name }} in project {{ $labels.project }} is out of sync"
+
+              - alert: ArgoCDAppUnhealthy
+                expr: argocd_app_info{health_status!="Healthy"} == 1
+                for: 10m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: "ArgoCD app {{ $labels.name }} is not Healthy"
+
+              - alert: ArgoCDSyncFailed
+                expr: argocd_app_info{operation_state_phase="Failed"} == 1
+                for: 0m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: "ArgoCD sync FAILED for {{ $labels.name }}"
+
+              - alert: ArgoCDRepoServerDown
+                expr: up{job="argocd"} == 0
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: "ArgoCD repo server is down"

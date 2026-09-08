@@ -1,0 +1,89 @@
+# ── ApplicationSet: myapp across all clusters ─────────────────────
+#
+# ONE ApplicationSet generates THREE Applications:
+#   myapp-dev     → dev cluster     (myapp-dev namespace)
+#   myapp-staging → staging cluster (myapp-staging namespace)
+#   myapp-prod    → prod cluster    (myapp-prod namespace)
+#
+# When you add a new cluster: add one entry to the list generator.
+# ArgoCD automatically creates a new Application for it.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: myapp
+  namespace: argocd
+spec:
+  # ── Generator: defines the matrix of clusters ──────────────────
+  generators:
+    - list:
+        elements:
+          - cluster:     dev
+            url:         https://dev-cluster.example.com
+            namespace:   myapp-dev
+            imageTag:    dev
+            replicas:    "1"
+            syncPolicy:  automated   # auto-sync in dev
+
+          - cluster:     staging
+            url:         https://staging-cluster.example.com
+            namespace:   myapp-staging
+            imageTag:    staging
+            replicas:    "2"
+            syncPolicy:  automated   # auto-sync in staging
+
+          - cluster:     prod
+            url:         https://prod-cluster.example.com
+            namespace:   myapp-prod
+            imageTag:    v1.0.0      # pinned tag — Image Updater manages this
+            replicas:    "5"
+            syncPolicy:  manual      # manual sync in prod (or use sync windows)
+
+  # ── Template: generates one Application per element ────────────
+  template:
+    metadata:
+      name: "myapp-{{cluster}}"
+      namespace: argocd
+      annotations:
+        # Image Updater watches ECR and updates imageTag in Git
+        argocd-image-updater.argoproj.io/image-list: >-
+          api=123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+        argocd-image-updater.argoproj.io/api.update-strategy: semver
+        argocd-image-updater.argoproj.io/write-back-method: git
+        argocd-image-updater.argoproj.io/git-branch: main
+      labels:
+        environment: "{{cluster}}"
+    spec:
+      project: myapp
+      source:
+        repoURL: https://github.com/your-org/myapp
+        targetRevision: main
+        path: "apps/myapp/overlays/{{cluster}}"
+      destination:
+        server: "{{url}}"
+        namespace: "{{namespace}}"
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+          - ApplyOutOfSyncOnly=true   # only apply changed resources
+        retry:
+          limit: 3
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+      # Automated sync only for non-prod
+      {{- if eq .cluster "prod" }}
+      # prod: manual sync — human approval required
+      {{- else }}
+      automated:
+        prune: true
+        selfHeal: true
+      {{- end }}
+
+      # ── Ignore differences that are managed externally ──────────
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas    # HPA manages this, ignore drift

@@ -1,0 +1,97 @@
+# ── AnalysisTemplate: success rate ────────────────────────────────
+# This runs DURING the canary rollout.
+# If error rate > 5% → rollout is marked Failed → auto rollback.
+#
+# Queries your real Prometheus — no fake metrics.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-success-rate
+  namespace: myapp-prod
+spec:
+  args:
+    - name: service-name
+
+  metrics:
+    - name: success-rate
+      # Run analysis every 1 minute for 5 minutes total
+      interval: 1m
+      count: 5
+      # Must pass on 4 out of 5 measurements (80% success)
+      successCondition: result[0] >= 0.95
+      failureLimit: 1
+
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            sum(
+              rate(http_requests_total{
+                service="{{args.service-name}}",
+                status!~"5.."
+              }[2m])
+            )
+            /
+            sum(
+              rate(http_requests_total{
+                service="{{args.service-name}}"
+              }[2m])
+            )
+---
+# ── AnalysisTemplate: p95 latency ─────────────────────────────────
+# Fails rollout if p95 latency exceeds 500ms during canary phase.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-latency-p95
+  namespace: myapp-prod
+spec:
+  args:
+    - name: service-name
+
+  metrics:
+    - name: latency-p95
+      interval: 1m
+      count: 5
+      successCondition: result[0] <= 0.5    # 500ms threshold
+      failureLimit: 1
+
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            histogram_quantile(
+              0.95,
+              sum(
+                rate(http_request_duration_seconds_bucket{
+                  service="{{args.service-name}}"
+                }[2m])
+              ) by (le)
+            )
+---
+# ── AnalysisTemplate: error count (absolute) ──────────────────────
+# Additional safety net — if more than 10 errors/min → fail
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-error-count
+  namespace: myapp-prod
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: error-count
+      interval: 1m
+      count: 5
+      successCondition: result[0] < 10
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            sum(
+              rate(http_requests_total{
+                service="{{args.service-name}}",
+                status=~"5.."
+              }[1m])
+            ) * 60

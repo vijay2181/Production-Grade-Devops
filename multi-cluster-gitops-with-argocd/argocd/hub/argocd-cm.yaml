@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # ── Server URL (used in notifications) ────────────────────────
+  url: https://argocd.internal.myapp.com
+
+  # ── Repositories ──────────────────────────────────────────────
+  # Add private repos here or via argocd repo add command
+
+  # ── Health check customisation ────────────────────────────────
+  resource.customizations.health.argoproj.io_Rollout: |
+    hs = {}
+    if obj.status ~= nil then
+      if obj.status.phase == "Degraded" then
+        hs.status = "Degraded"
+        hs.message = obj.status.message
+        return hs
+      end
+      if obj.status.phase == "Paused" then
+        hs.status = "Suspended"
+        hs.message = "Rollout is paused"
+        return hs
+      end
+      if obj.status.phase == "Progressing" then
+        hs.status = "Progressing"
+        hs.message = "Rollout is progressing"
+        return hs
+      end
+    end
+    hs.status = "Healthy"
+    return hs
+
+  # ── Sync window — block prod deploys on weekends ──────────────
+  # Configured per AppProject (see projects/)
+
+  # ── Image updater registry (ECR) ─────────────────────────────
+  # Configured in argocd-image-updater-config
+
+  # ── Enable status badge ───────────────────────────────────────
+  statusbadge.enabled: "true"
+
+  # ── Git polling interval ──────────────────────────────────────
+  timeout.reconciliation: "180s"    # poll Git every 3 min
+
+  # ── Diff customisation — ignore last-applied annotation ───────
+  resource.compareoptions: |
+    ignoreAggregatedRoles: false

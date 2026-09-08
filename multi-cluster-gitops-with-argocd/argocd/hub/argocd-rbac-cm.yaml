@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  # ── Policy ────────────────────────────────────────────────────
+  # Format: p, <role>, <resource>, <action>, <project>/<object>, allow|deny
+  policy.default: role:readonly
+
+  policy.csv: |
+    # Platform team — full admin
+    p, role:platform-admin, *, *, *, allow
+
+    # Backend team — deploy to dev and staging only
+    p, role:backend-team, applications, get,    myapp-dev/*, allow
+    p, role:backend-team, applications, sync,   myapp-dev/*, allow
+    p, role:backend-team, applications, get,    myapp-staging/*, allow
+    p, role:backend-team, applications, sync,   myapp-staging/*, allow
+
+    # Frontend team — deploy to dev only
+    p, role:frontend-team, applications, get,   myapp-dev/*, allow
+    p, role:frontend-team, applications, sync,  myapp-dev/*, allow
+
+    # CI service account — can sync all apps (used by Image Updater)
+    p, role:ci-bot, applications, sync,         */*, allow
+    p, role:ci-bot, applications, get,          */*, allow
+
+    # Group → role mappings (GitHub teams via SSO)
+    g, myorg:platform,  role:platform-admin
+    g, myorg:backend,   role:backend-team
+    g, myorg:frontend,  role:frontend-team
+    g, ci-bot,          role:ci-bot
+
+  # ── SSO (GitHub OAuth) ────────────────────────────────────────
+  # Configure in argocd-cm dex.config section
+  scopes: '[groups, email]'

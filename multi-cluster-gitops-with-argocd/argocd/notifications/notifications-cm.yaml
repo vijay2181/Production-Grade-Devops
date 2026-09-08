@@ -1,0 +1,117 @@
+# ── ArgoCD Notifications — Slack + email ──────────────────────────
+#
+# Sends Slack messages on:
+#   - Sync started
+#   - Sync succeeded
+#   - Sync failed
+#   - App health degraded
+#   - Canary rollout promoted
+#   - Canary rollout rolled back
+#
+# Install notifications controller (included in ArgoCD v2.6+)
+# Configure webhook: https://api.slack.com/messaging/webhooks
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # ── Slack integration ─────────────────────────────────────────
+  service.slack: |
+    token: $slack-token
+
+  # ── Notification templates ────────────────────────────────────
+  template.app-deployed: |
+    message: |
+      :white_check_mark: *{{.app.metadata.name}}* deployed successfully
+      *Environment:* {{.app.metadata.labels.environment}}
+      *Revision:* {{.app.status.sync.revision | truncate 8 ""}}
+      *Author:* {{(call .repo.GetCommitMetadata .app.status.sync.revision).Author}}
+      *Message:* {{(call .repo.GetCommitMetadata .app.status.sync.revision).Message}}
+    slack:
+      attachments: |
+        [{
+          "color": "good",
+          "fields": [
+            {"title": "App", "value": "{{.app.metadata.name}}", "short": true},
+            {"title": "Namespace", "value": "{{.app.spec.destination.namespace}}", "short": true},
+            {"title": "Image", "value": "{{(index .app.status.summary.images 0)}}", "short": false}
+          ]
+        }]
+
+  template.app-sync-failed: |
+    message: |
+      :x: *{{.app.metadata.name}}* sync FAILED
+      *Environment:* {{.app.metadata.labels.environment}}
+      *Error:* {{.app.status.operationState.message}}
+    slack:
+      attachments: |
+        [{
+          "color": "danger",
+          "fields": [
+            {"title": "App", "value": "{{.app.metadata.name}}", "short": true},
+            {"title": "Error", "value": "{{.app.status.operationState.message}}", "short": false}
+          ]
+        }]
+
+  template.app-health-degraded: |
+    message: |
+      :warning: *{{.app.metadata.name}}* health is *DEGRADED*
+      *Environment:* {{.app.metadata.labels.environment}}
+      *Status:* {{.app.status.health.status}}
+      *Message:* {{.app.status.health.message}}
+    slack:
+      attachments: |
+        [{
+          "color": "warning",
+          "fields": [
+            {"title": "App", "value": "{{.app.metadata.name}}", "short": true},
+            {"title": "Health", "value": "{{.app.status.health.status}}", "short": true}
+          ]
+        }]
+
+  template.rollout-completed: |
+    message: |
+      :rocket: *{{.app.metadata.name}}* canary rollout promoted to 100%
+      *Image:* {{(index .app.status.summary.images 0)}}
+    slack:
+      attachments: |
+        [{"color": "good"}]
+
+  template.rollout-aborted: |
+    message: |
+      :rotating_light: *{{.app.metadata.name}}* canary ABORTED — auto rolled back
+      Analysis failed. Previous stable version restored.
+    slack:
+      attachments: |
+        [{"color": "danger"}]
+
+  # ── Triggers: when to send ─────────────────────────────────────
+  trigger.on-deployed: |
+    - when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+      send: [app-deployed]
+
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      send: [app-sync-failed]
+
+  trigger.on-health-degraded: |
+    - when: app.status.health.status == 'Degraded'
+      send: [app-health-degraded]
+
+  # ── Subscriptions: which apps get which notifications ──────────
+  # Set per-Application via annotations (see below)
+---
+# ── Secret: Slack token ───────────────────────────────────────────
+# kubectl create secret generic argocd-notifications-secret \
+#   --from-literal=slack-token=xoxb-your-slack-bot-token \
+#   -n argocd
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-notifications-secret
+  namespace: argocd
+type: Opaque
+data:
+  slack-token: eG94Yi15b3VyLXNsYWNrLWJvdC10b2tlbg==  # base64 placeholder

@@ -1,0 +1,178 @@
+# ── Blue/Green Rollout ────────────────────────────────────────────
+#
+# HOW IT WORKS:
+#   Blue  = current live version (100% traffic)
+#   Green = new version (0% traffic, fully deployed and tested first)
+#
+#   Step 1: Deploy green (new version) alongside blue
+#   Step 2: Green is available on preview service — QA/automated tests hit it
+#   Step 3: Run AnalysisRun on preview service
+#   Step 4: If analysis passes → promote: green becomes active (100% traffic)
+#   Step 5: Blue pods stay running for scaleDownDelay (safe rollback window)
+#   Step 6: After scaleDownDelay → blue pods terminated
+#
+# USE CASE: When you want zero-risk instant cutover (not gradual canary)
+# TRADEOFF: Requires 2x compute during transition
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: myapp-api-bluegreen
+  namespace: myapp-staging    # Use blue/green in staging, canary in prod
+  labels:
+    app: api
+    strategy: bluegreen
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "3000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: api
+          image: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api:v1.0.0
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: staging
+            - name: PORT
+              value: "3000"
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DB_HOST
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_PASSWORD
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_HOST
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+  # ── Blue/Green Strategy ───────────────────────────────────────
+  strategy:
+    blueGreen:
+      # Active service = live traffic (blue)
+      activeService: myapp-api-active
+
+      # Preview service = new version traffic (green) — for testing only
+      previewService: myapp-api-preview
+
+      # Don't auto-promote — require human approval (or remove for full automation)
+      autoPromotionEnabled: false
+
+      # Keep blue pods running for 5 min after promotion (instant rollback window)
+      scaleDownDelaySeconds: 300
+
+      # Run analysis on preview (green) before promoting
+      prePromotionAnalysis:
+        templates:
+          - templateName: api-success-rate
+          - templateName: api-latency-p95
+        args:
+          - name: service-name
+            value: myapp-api-preview
+
+      # Run analysis on active (blue) after promotion to verify no degradation
+      postPromotionAnalysis:
+        templates:
+          - templateName: api-success-rate
+        args:
+          - name: service-name
+            value: myapp-api-active
+
+      # Label active/preview pods differently for visibility
+      activeMetadata:
+        labels:
+          version: blue
+      previewMetadata:
+        labels:
+          version: green
+---
+# ── Active service (blue — live traffic) ──────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-api-active
+  namespace: myapp-staging
+  labels:
+    app: api
+    variant: active
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+---
+# ── Preview service (green — test traffic only) ────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-api-preview
+  namespace: myapp-staging
+  labels:
+    app: api
+    variant: preview
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP

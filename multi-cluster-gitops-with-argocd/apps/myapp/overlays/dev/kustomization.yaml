@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: myapp-dev
+
+patches:
+  - path: patch.yaml
+
+images:
+  - name: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp/api
+    newTag: dev    # Image Updater keeps this in sync with latest dev build
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - DB_HOST=myapp-dev-rds.xxxx.us-east-1.rds.amazonaws.com
+      - DB_NAME=myapp_dev
+      - REDIS_HOST=myapp-dev-redis.xxxx.cache.amazonaws.com

@@ -1,0 +1,68 @@
+# ── Services for canary traffic split ─────────────────────────────
+# Argo Rollouts needs TWO services:
+#   stable  → receives (100 - canaryWeight)% of traffic
+#   canary  → receives canaryWeight% of traffic
+#
+# The Rollout controller manages the pod selectors automatically.
+# You do NOT manually edit these selectors.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-api-stable
+  namespace: myapp-prod
+  labels:
+    app: api
+    variant: stable
+spec:
+  selector:
+    app: api                  # Rollout controller adds version label dynamically
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-api-canary
+  namespace: myapp-prod
+  labels:
+    app: api
+    variant: canary
+spec:
+  selector:
+    app: api                  # Rollout controller manages this selector
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+---
+# ── Ingress for ALB-based traffic splitting ────────────────────────
+# ALB weights: stable=90, canary=10 (managed by Rollout controller)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp-api-ingress
+  namespace: myapp-prod
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789:certificate/xxxxx"
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  rules:
+    - host: api.myapp.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp-api-stable     # Rollout controller manages weights
+                port:
+                  number: 80
