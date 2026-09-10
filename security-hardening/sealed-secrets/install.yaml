@@ -1,0 +1,21 @@
+# ── Sealed Secrets — Helm values ──────────────────────────────────
+fullnameOverride: sealed-secrets-controller
+
+# The controller is the only thing that can decrypt SealedSecrets
+# It holds the private key — back this up!
+commandArgs:
+  - "--update-status"
+  - "--key-renew-period=720h"   # rotate controller key every 30 days
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# IMPORTANT: Backup the controller key before cluster destroy
+# kubectl get secret -n kube-system -l sealedsecrets.bitnami.com/sealed-secrets-key \
+#   -o yaml > sealed-secrets-master-key-backup.yaml
+# Store this in a secure location (NOT in Git)

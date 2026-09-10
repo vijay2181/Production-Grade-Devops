@@ -1,0 +1,232 @@
+# ── Kyverno Policies ──────────────────────────────────────────────
+# Kyverno runs as MutatingWebhook + ValidatingWebhook
+# mutate: auto-add missing security fields
+# validate: block if required fields missing
+---
+# ── Policy 1: Auto-inject security context (MUTATE) ───────────────
+# If a container doesn't have securityContext set,
+# Kyverno ADDS it automatically before the pod starts.
+# No developer action needed — safety net for all pods.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-security-context
+  annotations:
+    policies.kyverno.io/title: Add Security Context
+    policies.kyverno.io/description: >
+      Automatically adds production security context to containers
+      that don't define one. Ensures all containers run non-root
+      with a read-only filesystem.
+spec:
+  rules:
+    - name: add-security-context
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces:
+                - myapp
+                - myapp-dev
+                - myapp-staging
+                - myapp-prod
+      mutate:
+        patchStrategicMerge:
+          spec:
+            securityContext:
+              +(runAsNonRoot): true          # + means: only add if not set
+              +(runAsUser): 1001
+              +(fsGroup): 1001
+              +(seccompProfile):
+                type: RuntimeDefault
+            containers:
+              - (name): "*"                   # apply to all containers
+                securityContext:
+                  +(allowPrivilegeEscalation): false
+                  +(readOnlyRootFilesystem): true
+                  +(capabilities):
+                    drop:
+                      - ALL
+---
+# ── Policy 2: Require liveness + readiness probes (VALIDATE) ──────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-probes
+  annotations:
+    policies.kyverno.io/title: Require Pod Probes
+    policies.kyverno.io/description: >
+      All containers must have liveness and readiness probes.
+      Without probes, Kubernetes cannot detect or recover from failures.
+spec:
+  validationFailureAction: Enforce    # Enforce = hard deny
+  rules:
+    - name: require-liveness-probe
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces:
+                - myapp
+                - myapp-prod
+      validate:
+        message: "Container '{{ request.object.spec.containers[0].name }}' must have a livenessProbe"
+        pattern:
+          spec:
+            containers:
+              - livenessProbe:
+                  httpGet:
+                    path: "?*"
+                    port: "?*"
+
+    - name: require-readiness-probe
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces:
+                - myapp
+                - myapp-prod
+      validate:
+        message: "Container must have a readinessProbe"
+        pattern:
+          spec:
+            containers:
+              - readinessProbe:
+                  httpGet:
+                    path: "?*"
+                    port: "?*"
+---
+# ── Policy 3: Require required labels (VALIDATE) ──────────────────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+  annotations:
+    policies.kyverno.io/title: Require Labels
+    policies.kyverno.io/description: >
+      All resources must have required labels for cost tracking,
+      incident routing, and ownership.
+spec:
+  validationFailureAction: Audit      # Audit = warn but allow (less disruptive)
+  rules:
+    - name: require-team-label
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet]
+              namespaces:
+                - myapp
+                - myapp-prod
+      validate:
+        message: >
+          Deployment must have labels: app.kubernetes.io/name,
+          app.kubernetes.io/part-of, and team
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              app.kubernetes.io/part-of: "?*"
+---
+# ── Policy 4: Deny delete on prod namespace (VALIDATE) ────────────
+# Prevents accidental kubectl delete namespace myapp-prod
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: deny-prod-namespace-delete
+  annotations:
+    policies.kyverno.io/title: Deny Production Namespace Deletion
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: deny-delete-prod-namespace
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              names:
+                - myapp-prod
+                - myapp
+              operations:
+                - DELETE
+      validate:
+        message: >
+          Deleting production namespace 'myapp-prod' is not allowed.
+          If this is intentional, remove this policy first.
+        deny: {}
+---
+# ── Policy 5: Require PodDisruptionBudget per Deployment ──────────
+# Fix: previous version used broken JMESPath inline expression.
+# Correct approach: use Kyverno context.apiCall to fetch PDBs
+# from the Kubernetes API and check against them.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pdb
+  annotations:
+    policies.kyverno.io/title: Require PodDisruptionBudget
+    policies.kyverno.io/description: >
+      Every Deployment with replicas > 1 must have a matching
+      PodDisruptionBudget to ensure availability during node drains.
+spec:
+  validationFailureAction: Audit
+  rules:
+    - name: require-pdb-for-deployment
+      match:
+        any:
+          - resources:
+              kinds: [Deployment]
+              namespaces:
+                - myapp
+                - myapp-prod
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.replicas }}"
+            operator: GreaterThan
+            value: 1
+      # Fix: use context.apiCall to query existing PDBs in the namespace
+      context:
+        - name: pdbs
+          apiCall:
+            urlPath: >-
+              /apis/policy/v1/namespaces/{{ request.object.metadata.namespace }}/poddisruptionbudgets
+            jmesPath: "items[].spec.selector.matchLabels.app | [?@ != null] | []"
+      validate:
+        message: >
+          Deployment '{{ request.object.metadata.name }}' has replicas > 1
+          but no PodDisruptionBudget exists. Create one with
+          matchLabels.app={{ request.object.metadata.labels.app }}
+          to protect availability during node maintenance.
+        deny:
+          conditions:
+            all:
+              # Check if the deployment's app label exists in any PDB's selector
+              - key: "{{ request.object.metadata.labels.app }}"
+                operator: AnyNotIn
+                value: "{{ pdbs }}"
+---
+# ── Policy 6: Auto-add team label (MUTATE) ────────────────────────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-default-labels
+  annotations:
+    policies.kyverno.io/title: Add Default Labels
+spec:
+  rules:
+    - name: add-managed-by-label
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet]
+              namespaces:
+                - myapp
+                - myapp-dev
+                - myapp-staging
+                - myapp-prod
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              +(app.kubernetes.io/managed-by): kyverno
+              +(environment): "{{ request.object.metadata.namespace }}"

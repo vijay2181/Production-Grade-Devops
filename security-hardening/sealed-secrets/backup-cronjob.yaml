@@ -1,0 +1,222 @@
+# =============================================================
+# sealed-secrets/backup-cronjob.yaml — Kubernetes CronJob that
+# runs the Sealed Secrets key backup nightly via backup.sh
+#
+# Prerequisites:
+#   1. Create the IRSA role with Secrets Manager write access
+#   2. Create the Slack webhook Secret:
+#        kubectl create secret generic slack-webhook \
+#          --from-literal=url=https://hooks.slack.com/... \
+#          -n kube-system
+#   3. Apply:
+#        kubectl apply -f sealed-secrets/backup-cronjob.yaml
+# =============================================================
+
+# ── RBAC: ServiceAccount + IAM role binding ───────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sealed-secrets-backup
+  namespace: kube-system
+  annotations:
+    # IRSA: role must allow secretsmanager:PutSecretValue,CreateSecret,GetSecretValue,DescribeSecret
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-sealed-secrets-backup-role"
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sealed-secrets-backup
+  namespace: kube-system
+rules:
+  # Read the controller key Secret
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+    resourceNames: []  # populated by label selector at runtime
+  # Label selector requires list on all secrets in kube-system
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sealed-secrets-backup
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: sealed-secrets-backup
+    namespace: kube-system
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: sealed-secrets-backup
+
+---
+# ── ConfigMap: embeds the backup.sh script ───────────────────
+# In production, this is generated from the file via:
+#   kubectl create configmap sealed-secrets-backup-script \
+#     --from-file=backup.sh=sealed-secrets/backup.sh \
+#     -n kube-system --dry-run=client -o yaml | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sealed-secrets-backup-script
+  namespace: kube-system
+  labels:
+    app: sealed-secrets-backup
+# data.backup.sh is populated from sealed-secrets/backup.sh at deploy time
+# See the install command in the header comment above.
+
+---
+# ── CronJob: nightly backup at 02:00 UTC ─────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sealed-secrets-backup
+  namespace: kube-system
+  labels:
+    app: sealed-secrets-backup
+    managed-by: security-stack
+spec:
+  # Every day at 02:00 UTC — low-traffic window
+  schedule: "0 2 * * *"
+  # Only one backup job at a time
+  concurrencyPolicy: Forbid
+  # Keep last 3 successful runs for audit
+  successfulJobsHistoryLimit: 3
+  # Keep last 3 failures for debugging
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Retry up to 2 times on failure
+      backoffLimit: 2
+      # Kill job if it runs > 10 minutes (prevents orphaned pods)
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: sealed-secrets-backup
+        spec:
+          serviceAccountName: sealed-secrets-backup
+          restartPolicy: OnFailure
+
+          # Security hardening for the backup pod
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+
+          containers:
+            - name: backup
+              # AWS CLI + kubectl + jq + bash
+              image: amazon/aws-cli:2.15.0
+              command:
+                - /bin/bash
+                - /scripts/backup.sh
+              env:
+                - name: CLUSTER
+                  value: "myapp-prod"
+                - name: AWS_REGION
+                  value: "us-east-1"
+                - name: AWS_ACCOUNT_ID
+                  value: "123456789012"
+                # Slack webhook injected from Secret (never hardcoded)
+                - name: SLACK_WEBHOOK
+                  valueFrom:
+                    secretKeyRef:
+                      name: slack-webhook
+                      key: url
+                      optional: true
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "256Mi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false  # aws CLI needs /tmp
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: backup-script
+                  mountPath: /scripts
+                  readOnly: true
+
+          volumes:
+            - name: backup-script
+              configMap:
+                name: sealed-secrets-backup-script
+                defaultMode: 0755
+
+---
+# ── Freshness-check CronJob: alerts if backup > 24h old ──────
+# Runs at 08:00 UTC — if the 02:00 job failed silently, this fires Slack
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sealed-secrets-backup-freshness-check
+  namespace: kube-system
+  labels:
+    app: sealed-secrets-backup
+spec:
+  schedule: "0 8 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app: sealed-secrets-backup-freshness-check
+        spec:
+          serviceAccountName: sealed-secrets-backup
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: freshness-check
+              image: amazon/aws-cli:2.15.0
+              command:
+                - /bin/bash
+                - /scripts/backup.sh
+                - --check-stale
+              env:
+                - name: CLUSTER
+                  value: "myapp-prod"
+                - name: AWS_REGION
+                  value: "us-east-1"
+                - name: SLACK_WEBHOOK
+                  valueFrom:
+                    secretKeyRef:
+                      name: slack-webhook
+                      key: url
+                      optional: true
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: backup-script
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: backup-script
+              configMap:
+                name: sealed-secrets-backup-script
+                defaultMode: 0755

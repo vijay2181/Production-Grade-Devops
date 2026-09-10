@@ -1,0 +1,74 @@
+# =============================================================
+# trivy/install.yaml — Helm values for Trivy Operator
+#
+# Install:
+#   helm upgrade --install trivy-operator aquasecurity/trivy-operator \
+#     --namespace trivy-system \
+#     --create-namespace \
+#     --values trivy/install.yaml \
+#     --wait
+#
+# IRSA role must be created first via:
+#   cd irsa && terraform apply
+# Then substitute the actual role ARN below.
+# =============================================================
+
+# ── Service Account (IRSA) ────────────────────────────────────
+# Trivy pulls images from ECR and writes results to S3 (optional cache).
+# The IAM role must allow:
+#   ecr:GetAuthorizationToken
+#   ecr:BatchGetImage
+#   ecr:GetDownloadUrlForLayer
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-trivy-operator-role"
+
+# ── Trivy scanner settings ────────────────────────────────────
+trivy:
+  # Skip vulnerabilities that have no fix available (reduces noise)
+  ignoreUnfixed: true
+  # Focus on actionable severities
+  severity: "CRITICAL,HIGH,MEDIUM"
+  # Private ECR registry — token refreshed via IRSA automatically
+  imageRef: "public.ecr.aws/aquasecurity/trivy:latest"
+  # Use cluster-local DB cache to avoid rate-limiting on repeat scans
+  dbRepository: "ghcr.io/aquasecurity/trivy-db"
+  dbRepositoryInsecure: false
+
+# ── Operator feature flags ────────────────────────────────────
+operator:
+  # Scan workload images for CVEs
+  vulnerabilityScannerEnabled: true
+  # Audit Kubernetes configs against CIS benchmarks
+  configAuditScannerEnabled: true
+  # Detect secrets/credentials in container images
+  secretScannerEnabled: true
+  # Detect exposed services (NodePort / LoadBalancer)
+  exposedSecretScannerEnabled: true
+  # Kill long-running scan jobs (avoids orphaned pods)
+  scanJobTimeout: "5m"
+  # How often to re-scan existing workloads
+  vulnerabilityScannerScanOnlyCurrentRevisions: true
+  # Concurrent scan jobs — tune per cluster node count
+  concurrentScanJobsLimit: "10"
+  # Metrics for Prometheus scraping
+  metricsVulnIdEnabled: true
+
+# ── Resource limits ───────────────────────────────────────────
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# ── Compliance reports ────────────────────────────────────────
+compliance:
+  # CIS Kubernetes Benchmark
+  - spec: k8s-cis
+  # NSA Kubernetes Hardening
+  - spec: k8s-nsa
+  # PCI-DSS (if applicable to workload)
+  - spec: k8s-pss-restricted

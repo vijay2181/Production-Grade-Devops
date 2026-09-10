@@ -1,0 +1,96 @@
+# ── OPA Gatekeeper Constraints ────────────────────────────────────
+# Constraints are INSTANCES of ConstraintTemplates.
+# They define WHERE the policy applies (namespaces, kinds) and
+# WHAT parameters to use.
+---
+# Deny :latest tags on all namespaces except kube-system
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: DenyLatestImages
+metadata:
+  name: deny-latest-images
+spec:
+  enforcementAction: deny      # deny = hard block. use "warn" to test first
+  match:
+    kinds:
+      - apiGroups: [apps]
+        kinds: [Deployment, DaemonSet, StatefulSet]
+      - apiGroups: [""]
+        kinds: [Pod]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - cert-manager           # cert-manager uses :latest in some components
+---
+# Deny privileged containers cluster-wide (no exceptions)
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: DenyPrivilegedContainers
+metadata:
+  name: deny-privileged-containers
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [apps]
+        kinds: [Deployment, DaemonSet, StatefulSet]
+      - apiGroups: [""]
+        kinds: [Pod]
+    excludedNamespaces:
+      - kube-system             # system DaemonSets need privileged
+---
+# Require resource limits — all app namespaces
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: RequireResourceLimits
+metadata:
+  name: require-resource-limits
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [apps]
+        kinds: [Deployment, DaemonSet, StatefulSet]
+    namespaces:
+      - myapp
+      - myapp-dev
+      - myapp-staging
+      - myapp-prod
+---
+# Only allow images from ECR
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: AllowedImageRegistries
+metadata:
+  name: allowed-image-registries
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [apps]
+        kinds: [Deployment, DaemonSet, StatefulSet]
+      - apiGroups: [""]
+        kinds: [Pod]
+    namespaces:
+      - myapp
+      - myapp-dev
+      - myapp-staging
+      - myapp-prod
+  parameters:
+    allowedRegistries:
+      - "123456789.dkr.ecr.us-east-1.amazonaws.com"  # your ECR
+      - "gcr.io/distroless"                           # distroless base images
+      - "public.ecr.aws"                              # AWS public ECR
+---
+# Deny root user in app namespaces
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: DenyRootUser
+metadata:
+  name: deny-root-user
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [apps]
+        kinds: [Deployment, DaemonSet, StatefulSet]
+    namespaces:
+      - myapp
+      - myapp-dev
+      - myapp-staging
+      - myapp-prod

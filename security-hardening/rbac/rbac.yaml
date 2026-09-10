@@ -1,0 +1,113 @@
+# ── RBAC: Least Privilege Roles ──────────────────────────────────
+# Principle: every ServiceAccount and user gets the minimum
+# permissions needed — nothing more.
+---
+# ── Developer Role: read-only on prod ─────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer-readonly
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  # Read pods, services, deployments — but NOT secrets
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, endpoints, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  # Allow viewing events for debugging
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+  # NO access to secrets, no exec, no delete
+---
+# ── Deployer Role: deploy to staging only ─────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: staging-deployer
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch]
+    # Note: no delete — prevent accidental removal
+  - apiGroups: [""]
+    resources: [pods, services, configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  # Cannot touch prod namespace — enforced by RoleBinding scope
+---
+# ── Platform Team: full access ────────────────────────────────────
+# Only platform team gets cluster-admin — via binding, not ClusterRole
+# Use the built-in cluster-admin ClusterRole
+---
+# ── App ServiceAccount: minimal permissions ───────────────────────
+# The myapp API pod gets its own ServiceAccount with ZERO k8s API permissions
+# It only needs: RDS (via IRSA), Redis (via network), nothing else
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: myapp-api
+  namespace: myapp
+  annotations:
+    # IRSA: this ServiceAccount maps to an IAM role (no static credentials)
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/myapp-api-role"
+    eks.amazonaws.com/token-expiration: "3600"   # token expires every 1 hour
+automountServiceAccountToken: false   # do NOT auto-mount — app doesn't need k8s API
+---
+# ── Bind developer-readonly to dev team in prod namespace ─────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developers-readonly-prod
+  namespace: myapp-prod
+subjects:
+  - kind: Group
+    name: "myorg:backend"      # GitHub SSO group
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: "myorg:frontend"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: developer-readonly
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── Bind staging-deployer to backend team in staging namespace ────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-deployer-staging
+  namespace: myapp-staging
+subjects:
+  - kind: Group
+    name: "myorg:backend"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: staging-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── Bind platform-admin to platform team cluster-wide ─────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-team-admin
+subjects:
+  - kind: Group
+    name: "myorg:platform"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io

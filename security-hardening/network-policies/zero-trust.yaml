@@ -1,0 +1,157 @@
+# ── Zero-Trust NetworkPolicy ──────────────────────────────────────
+# Default: deny everything. Then allow only what is needed.
+# This is the correct production model.
+# Most clusters have no NetworkPolicy — ALL pods can talk to ALL pods.
+---
+# ── Default deny ALL ingress and egress in myapp namespace ────────
+# This must be applied FIRST before any allow rules
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: myapp
+spec:
+  podSelector: {}       # applies to ALL pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ── Allow: ALB → API pods ─────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alb-to-api
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # ALB controller runs in kube-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+---
+# ── Allow: API → RDS (Postgres port 5432) ────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-rds
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 5432
+---
+# ── Allow: API → Redis (ElastiCache port 6379) ───────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-redis
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 6379
+---
+# ── Allow: API → OTel Collector (tracing) ────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-otel
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app: otel-collector
+      ports:
+        - protocol: TCP
+          port: 4317
+---
+# ── Allow: DNS resolution (all pods need this) ────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: myapp
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ── Allow: Prometheus → API scrape (metrics collection) ──────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 3000
+---
+# ── BLOCK: API → Kubernetes API Server ────────────────────────────
+# Our app pod has no reason to talk to the k8s API.
+# automountServiceAccountToken: false handles this at pod level,
+# but this NetworkPolicy adds defence-in-depth.
+# The default-deny-all above already blocks this,
+# but being explicit makes the intent clear.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: block-api-to-k8s-api
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Egress
+  egress:
+    # No rule for port 443/6443 = k8s API → blocked by default-deny
+    # This NetworkPolicy exists for documentation clarity
+    - ports: []   # empty = matches nothing = no extra egress allowed

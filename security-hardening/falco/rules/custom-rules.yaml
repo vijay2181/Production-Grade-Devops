@@ -1,0 +1,181 @@
+# ── Custom Falco Rules for myapp ──────────────────────────────────
+# These rules are SPECIFIC to our application.
+# They are more precise than default rules and produce fewer false positives.
+#
+# Rule structure:
+#   - rule: name
+#     desc: description
+#     condition: <boolean expression using fields>
+#     output: <string with field interpolation>
+#     priority: EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFO|DEBUG
+#     tags: [mitre_*, cis_*]
+
+# ── Macros: reusable conditions ───────────────────────────────────
+- macro: myapp_container
+  condition: container.image.repository contains "myapp/api"
+
+- macro: expected_processes
+  condition: proc.name in (node, npm, sh, node)
+
+# Fix: Falco does NOT support CIDR notation in `fd.sip in (...)`.
+# fd.sip is a single IP string — CIDR matching requires fd.net.
+# Use fd.net for subnet matching, fd.sip for exact IP matching.
+- macro: allowed_outbound_destinations
+  condition: >
+    fd.net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    or fd.sip = "169.254.169.254"
+
+# ── Rule 1: Unexpected process in myapp container ─────────────────
+# node containers should ONLY run node processes
+# If bash, python, curl, wget appear → likely an attacker
+- rule: Unexpected Process in myapp Container
+  desc: >
+    A process other than node was spawned inside a myapp container.
+    This could indicate a shell injection or reverse shell attack.
+  condition: >
+    spawned_process
+    and myapp_container
+    and not expected_processes
+    and not proc.name in (node_exporter, sh)
+  output: >
+    Unexpected process spawned in myapp container
+    (user=%user.name user_uid=%user.uid proc=%proc.name
+     parent=%proc.pname cmd=%proc.cmdline
+     pod=%k8s.pod.name ns=%k8s.ns.name
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [mitre_execution, container]
+
+# ── Rule 2: Shell spawned in container ────────────────────────────
+- rule: Shell Spawned in myapp Container
+  desc: >
+    An interactive shell was spawned in a container.
+    This is a strong indicator of kubectl exec abuse or compromise.
+  condition: >
+    spawned_process
+    and myapp_container
+    and proc.name in (bash, sh, zsh, ash, dash, fish)
+    and proc.pname != "runc"
+  output: >
+    Shell spawned in myapp container
+    (shell=%proc.name parent=%proc.pname
+     user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+     terminal=%proc.tty)
+  priority: CRITICAL
+  tags: [mitre_execution, mitre_persistence]
+
+# ── Rule 3: Write to sensitive filesystem path ────────────────────
+- rule: Write to Sensitive Path in Container
+  desc: >
+    A process attempted to write to /etc, /bin, /usr, /lib.
+    Legitimate node apps never write there.
+    Could indicate container escape preparation.
+  condition: >
+    open_write
+    and myapp_container
+    and (fd.name startswith /etc/
+      or fd.name startswith /bin/
+      or fd.name startswith /usr/
+      or fd.name startswith /lib/)
+    and not fd.name startswith /etc/hosts
+    and not fd.name startswith /etc/resolv.conf
+  output: >
+    Write to sensitive path in myapp container
+    (file=%fd.name proc=%proc.name user=%user.name
+     pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: ERROR
+  tags: [mitre_persistence, filesystem]
+
+# ── Rule 4: Outbound connection to unexpected destination ─────────
+- rule: Unexpected Outbound Connection from myapp
+  desc: >
+    myapp container made an outbound connection to an unexpected destination.
+    Legitimate connections: RDS, Redis, internal services only.
+    External connection could indicate C2 beaconing or data exfiltration.
+  condition: >
+    outbound
+    and myapp_container
+    and not allowed_outbound_destinations
+    and not fd.sip in ("0.0.0.0", "127.0.0.1", "::1")
+  output: >
+    Unexpected outbound connection from myapp
+    (connection=%fd.name proc=%proc.name
+     pod=%k8s.pod.name ns=%k8s.ns.name
+     dest_ip=%fd.rip dest_port=%fd.rport)
+  priority: WARNING
+  tags: [mitre_exfiltration, network]
+
+# ── Rule 5: Read sensitive Kubernetes files ───────────────────────
+- rule: Read Kubernetes Service Account Token
+  desc: >
+    A process read the Kubernetes service account token.
+    Legitimate apps don't need to read this file directly.
+    Attackers use it to authenticate to the Kubernetes API.
+  condition: >
+    open_read
+    and myapp_container
+    and fd.name in (
+      "/var/run/secrets/kubernetes.io/serviceaccount/token",
+      "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    )
+    and proc.name != "node"
+  output: >
+    Service account token read in myapp container
+    (file=%fd.name proc=%proc.name user=%user.name
+     pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: WARNING
+  tags: [mitre_credential_access]
+
+# ── Rule 6: Cryptominer process detected ──────────────────────────
+- rule: Cryptominer Process Detected
+  desc: >
+    A known cryptomining binary or process was detected.
+    Common after supply chain attack or container compromise.
+  condition: >
+    spawned_process
+    and proc.name in (
+      xmrig, xmr-stak, minerd, cpuminer, ethminer,
+      claymore, ccminer, sgminer, bfgminer, cgminer
+    )
+  output: >
+    Cryptominer process detected!
+    (proc=%proc.name cmd=%proc.cmdline
+     pod=%k8s.pod.name ns=%k8s.ns.name
+     image=%container.image.repository)
+  priority: CRITICAL
+  tags: [mitre_impact, cryptomining]
+
+# ── Rule 7: Privilege escalation attempt ──────────────────────────
+- rule: Privilege Escalation Attempt
+  desc: >
+    Process attempted setuid/setgid or capability change.
+    Indicates privilege escalation attempt.
+  condition: >
+    evt.type in (setuid, setgid, setresuid, setresgid)
+    and myapp_container
+    and not user.uid = 0
+  output: >
+    Privilege escalation attempt in myapp
+    (proc=%proc.name user=%user.name new_uid=%evt.arg.uid
+     pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [mitre_privilege_escalation]
+
+# ── Rule 8: Container drift detection ────────────────────────────
+# Detect when new executable appears in container at runtime
+# (package install, tool download after container start)
+- rule: Container Drift Detected
+  desc: >
+    A new executable was created or modified in the container.
+    Legitimate containers don't install new software at runtime.
+  condition: >
+    (evt.type in (open, openat) and evt.is_open_write = true)
+    and myapp_container
+    and fd.name endswith ".sh"
+    or (fd.name startswith "/tmp/" and fd.name endswith ".elf")
+  output: >
+    Container drift detected — new executable created
+    (file=%fd.name proc=%proc.name
+     pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: ERROR
+  tags: [mitre_persistence, container_drift]

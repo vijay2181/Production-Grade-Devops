@@ -1,0 +1,74 @@
+# ── Falco Helm values — production (eBPF mode) ────────────────────
+# eBPF mode: no kernel module required — works on EKS without node config
+# falcosidekick: routes alerts to Slack, PagerDuty, Loki
+
+driver:
+  kind: ebpf              # ← use eBPF on EKS (no kernel module)
+
+falco:
+  grpc:
+    enabled: true
+  grpc_output:
+    enabled: true
+  json_output: true       # structured output for Loki ingestion
+  log_stderr: true
+  log_syslog: false
+  log_level: info
+  priority: debug         # capture all severity levels
+
+  # Load custom rules in addition to default rules
+  rules_file:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/falco_rules.local.yaml
+    - /etc/falco/k8s_audit_rules.yaml
+    - /etc/falco/rules.d             # custom rules mounted from ConfigMap
+
+  # K8s audit log integration
+  k8s_audit_endpoint: /k8s_audit
+  webserver:
+    enabled: true
+    listen_port: 8765
+
+falcoctl:
+  artifact:
+    install:
+      enabled: true
+    follow:
+      enabled: true
+
+# Falcosidekick: route alerts to multiple destinations
+falcosidekick:
+  enabled: true
+  replicaCount: 2          # HA for alerting
+  config:
+    slack:
+      webhookurl: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+      channel: "#security-alerts"
+      minimumpriority: warning
+      messageformat: |
+        :rotating_light: *Falco Security Alert*
+        *Rule:* {{ .Rule }}
+        *Priority:* {{ .Priority }}
+        *Output:* {{ .Output }}
+        *Pod:* {{ index .OutputFields "k8s.pod.name" }}
+        *Namespace:* {{ index .OutputFields "k8s.ns.name" }}
+        *Time:* {{ .Time }}
+
+    pagerduty:
+      routingkey: "YOUR_PAGERDUTY_KEY"
+      minimumpriority: critical
+
+    # Send Falco alerts to Loki (same stack as Project 3)
+    loki:
+      hostport: "http://loki.observability.svc.cluster.local:3100"
+      minimumpriority: warning
+      tenant: ""
+      endpoint: /loki/api/v1/push
+      extralabels: "source=falco,cluster=myapp-prod"
+
+    # Expose Falco metrics for Prometheus
+    prometheus:
+      extralabels: "cluster=myapp-prod"
+
+  webui:
+    enabled: true          # Falcosidekick UI for alert browsing

@@ -1,0 +1,209 @@
+# ── OPA Gatekeeper ConstraintTemplate: Deny Latest Tag ────────────
+# Blocks any pod/deployment using :latest image tag
+# Production requires pinned, immutable image tags
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: denylatestimages
+  annotations:
+    description: "Deny container images with :latest tag"
+spec:
+  crd:
+    spec:
+      names:
+        kind: DenyLatestImages
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package denylatestimages
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          endswith(container.image, ":latest")
+          msg := sprintf(
+            "Container '%v' uses :latest tag. Pin to a specific version. Got: %v",
+            [container.name, container.image]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          endswith(container.image, ":latest")
+          msg := sprintf(
+            "InitContainer '%v' uses :latest tag. Got: %v",
+            [container.name, container.image]
+          )
+        }
+
+        # Also block images with no tag at all (implicit :latest)
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not contains(container.image, ":")
+          msg := sprintf(
+            "Container '%v' has no image tag (implicit :latest). Got: %v",
+            [container.name, container.image]
+          )
+        }
+---
+# ── OPA Gatekeeper ConstraintTemplate: Deny Privileged ───────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: denyprivilegedcontainers
+  annotations:
+    description: "Deny privileged containers, hostPID, hostNetwork, hostIPC"
+spec:
+  crd:
+    spec:
+      names:
+        kind: DenyPrivilegedContainers
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package denyprivilegedcontainers
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Container '%v' must not be privileged", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostPID == true
+          msg := "hostPID must not be true — grants access to host process namespace"
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostNetwork == true
+          msg := "hostNetwork must not be true — grants access to host network"
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostIPC == true
+          msg := "hostIPC must not be true — grants access to host IPC namespace"
+        }
+---
+# ── OPA Gatekeeper ConstraintTemplate: Require Resource Limits ────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: requireresourcelimits
+  annotations:
+    description: "Require CPU and memory limits on all containers"
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequireResourceLimits
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requireresourcelimits
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.limits.cpu
+          msg := sprintf(
+            "Container '%v' must have CPU limits set", [container.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.limits.memory
+          msg := sprintf(
+            "Container '%v' must have memory limits set", [container.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.requests.cpu
+          msg := sprintf(
+            "Container '%v' must have CPU requests set", [container.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.requests.memory
+          msg := sprintf(
+            "Container '%v' must have memory requests set", [container.name]
+          )
+        }
+---
+# ── OPA Gatekeeper ConstraintTemplate: Allowed Registries ─────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: allowedimageregistries
+  annotations:
+    description: "Only allow images from approved registries (ECR)"
+spec:
+  crd:
+    spec:
+      names:
+        kind: AllowedImageRegistries
+      validation:
+        openAPIV3Schema:
+          properties:
+            allowedRegistries:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package allowedimageregistries
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not allowed_registry(container.image)
+          msg := sprintf(
+            "Container '%v' uses image from disallowed registry: %v. Allowed: %v",
+            [container.name, container.image, input.parameters.allowedRegistries]
+          )
+        }
+
+        allowed_registry(image) {
+          registry := input.parameters.allowedRegistries[_]
+          startswith(image, registry)
+        }
+---
+# ── OPA Gatekeeper ConstraintTemplate: Deny Root User ─────────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: denyrootuser
+  annotations:
+    description: "Deny containers running as root (UID 0)"
+spec:
+  crd:
+    spec:
+      names:
+        kind: DenyRootUser
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package denyrootuser
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.runAsUser == 0
+          msg := sprintf(
+            "Container '%v' must not run as root (runAsUser: 0)", [container.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.securityContext.runAsUser == 0
+          msg := "Pod must not run as root (pod-level runAsUser: 0)"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.runAsNonRoot == false
+          msg := sprintf(
+            "Container '%v' must have runAsNonRoot: true", [container.name]
+          )
+        }

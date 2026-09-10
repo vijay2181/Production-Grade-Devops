@@ -1,0 +1,83 @@
+# ── Pod Security Admission — namespace labels ─────────────────────
+# Kubernetes built-in feature (no extra tools)
+# Three profiles:
+#   privileged → no restrictions (system components)
+#   baseline   → prevents known privilege escalations
+#   restricted → full security hardening (our app namespaces)
+#
+# Three modes:
+#   enforce → reject pods that violate
+#   audit   → allow but log violations
+#   warn    → allow but warn in API response
+---
+# ── Production namespace: RESTRICTED ─────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp
+  labels:
+    # Enforce restricted profile — pods must comply or they are rejected
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # Also audit and warn for visibility
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp-prod
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# ── Staging: RESTRICTED (same as prod) ───────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp-staging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# ── Dev: BASELINE (less strict — allows faster iteration) ─────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp-dev
+  labels:
+    # Baseline in dev — warn on restricted violations but don't block
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted    # warn but don't block
+    pod-security.kubernetes.io/warn-version: latest
+---
+# ── Monitoring: BASELINE ─────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# ── Observability: BASELINE ───────────────────────────────────────
+# OTel Collector DaemonSet needs DAC_READ_SEARCH capability
+# which is allowed under baseline but not restricted
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
