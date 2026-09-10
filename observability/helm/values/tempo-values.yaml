@@ -1,0 +1,64 @@
+# ── Grafana Tempo Helm values — production ────────────────────────
+# Distributed tracing backend
+# Stores traces in S3 (production) or local disk (dev)
+tempo:
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: myapp-tempo-traces
+        region: us-east-1
+        # Uses IRSA — no static credentials
+      wal:
+        path: /var/tempo/wal
+      block:
+        bloom_filter_false_positive: 0.05
+        v2_index_downsample_bytes: 1000
+        v2_encoding: zstd         # compress traces
+
+  retention: 720h   # 30 days
+
+  # Receivers: accept OTLP from collector
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+  # Search: enable TraceQL queries in Grafana
+  search:
+    enabled: true
+    max_duration: 0s
+    external_hedge_requests_at: 8s
+    external_hedge_requests_up_to: 2
+
+  # Metrics generator: derive metrics FROM traces
+  # (RED metrics without instrumenting Prometheus separately)
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write"
+    processor:
+      service_graphs:
+        enabled: true
+        dimensions: [http.method, http.status_code, db.system]
+      span_metrics:
+        enabled: true
+        dimensions: [http.method, http.route, http.status_code, db.operation]
+
+  # Ingester
+  ingester:
+    max_block_duration: 5m
+    trace_idle_period: 10s
+    max_block_bytes: 1_000_000
+
+persistence:
+  enabled: true
+  storageClassName: gp3
+  size: 50Gi
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/myapp-tempo-s3-role"

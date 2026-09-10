@@ -1,0 +1,166 @@
+# ── SLO Recording Rules + Burn Rate Alerts ────────────────────────
+#
+# SLO: 99.9% of requests succeed over a 30-day rolling window
+#
+# Error budget:
+#   99.9% SLO = 0.1% allowed failures
+#   30 days    = 43,200 minutes
+#   Budget     = 43.2 minutes of total downtime per month
+#
+# Burn rate:
+#   burn rate 1  = consuming budget at exactly the right pace (safe)
+#   burn rate 14 = consuming budget 14x faster (page someone NOW)
+#   burn rate 2  = consuming budget 2x faster (wake up ticket)
+#
+# This is the Google SRE book multi-window multi-burn-rate alerting.
+# Used by Google, Netflix, Spotify in production.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: myapp-slo-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ── SLO Recording Rules (pre-compute for dashboard speed) ───
+    - name: myapp.slo.recording
+      interval: 30s
+      rules:
+        # Success rate over various windows
+        - record: job:http_requests_success:rate5m
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[5m]))
+
+        - record: job:http_requests_success:rate30m
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[30m]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[30m]))
+
+        - record: job:http_requests_success:rate1h
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[1h]))
+
+        - record: job:http_requests_success:rate6h
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[6h]))
+
+        - record: job:http_requests_success:rate1d
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[1d]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[1d]))
+
+        - record: job:http_requests_success:rate3d
+          expr: |
+            sum(rate(http_requests_total{job="myapp-api", status_code!~"5.."}[3d]))
+            /
+            sum(rate(http_requests_total{job="myapp-api"}[3d]))
+
+        # Error budget remaining (1 = full budget, 0 = budget exhausted)
+        - record: job:slo_error_budget_remaining:ratio
+          expr: |
+            1 - (
+              (1 - job:http_requests_success:rate3d)
+              / (1 - 0.999)
+            )
+
+        # Latency SLO: 95% of requests < 500ms
+        - record: job:http_request_latency_p95:rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{job="myapp-api"}[5m]))
+              by (le)
+            )
+
+    # ── Multi-window multi-burn-rate alerts ──────────────────────
+    # Based on Google SRE book Chapter 5
+    - name: myapp.slo.alerts
+      rules:
+        # ── CRITICAL: Page immediately ─────────────────────────
+        # Burn rate > 14x over 1h AND 5m windows
+        # Consuming 14% of monthly budget in just 1 hour
+        - alert: SLOBurnRateCritical
+          expr: |
+            (job:http_requests_success:rate1h < (1 - 14.4 * (1 - 0.999)))
+            and
+            (job:http_requests_success:rate5m < (1 - 14.4 * (1 - 0.999)))
+          for: 2m
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "🚨 SLO CRITICAL — burn rate > 14x (page now)"
+            description: |
+              Error rate is consuming the 30-day error budget 14x faster than allowed.
+              At this rate, the entire monthly budget will be exhausted in ~2 hours.
+              Current success rate: {{ $value | humanizePercentage }}
+              SLO target: 99.9%
+
+        # ── WARNING: Will exhaust budget in ~3 days ────────────
+        # Burn rate > 6x over 6h AND 30m windows
+        - alert: SLOBurnRateHigh
+          expr: |
+            (job:http_requests_success:rate6h < (1 - 6 * (1 - 0.999)))
+            and
+            (job:http_requests_success:rate30m < (1 - 6 * (1 - 0.999)))
+          for: 15m
+          labels:
+            severity: warning
+            slo: availability
+          annotations:
+            summary: "⚠️ SLO WARNING — burn rate > 6x"
+            description: |
+              Error rate is consuming error budget 6x faster than allowed.
+              Budget will be exhausted in approximately 5 days at this rate.
+              Current success rate: {{ $value | humanizePercentage }}
+
+        # ── INFO: Slow burn — investigate this week ────────────
+        # Burn rate > 3x over 1d AND 6h windows
+        - alert: SLOBurnRateSlow
+          expr: |
+            (job:http_requests_success:rate1d < (1 - 3 * (1 - 0.999)))
+            and
+            (job:http_requests_success:rate6h < (1 - 3 * (1 - 0.999)))
+          for: 1h
+          labels:
+            severity: info
+            slo: availability
+          annotations:
+            summary: "ℹ️ SLO slow burn — error budget declining"
+            description: |
+              Error budget is draining slowly. No immediate action required
+              but investigate during business hours.
+
+        # ── Error budget nearly exhausted ─────────────────────
+        - alert: SLOErrorBudgetLow
+          expr: job:slo_error_budget_remaining:ratio < 0.1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "🚨 Error budget < 10% remaining this month"
+            description: |
+              Less than 10% of the monthly error budget remains.
+              Remaining: {{ $value | humanizePercentage }}
+              Consider freezing non-critical deployments.
+
+        # ── Latency SLO breach ─────────────────────────────────
+        - alert: LatencySLOBreach
+          expr: job:http_request_latency_p95:rate5m > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            slo: latency
+          annotations:
+            summary: "p95 latency SLO breached (> 500ms)"
+            description: |
+              95th percentile latency: {{ $value | humanizeDuration }}
+              SLO target: < 500ms

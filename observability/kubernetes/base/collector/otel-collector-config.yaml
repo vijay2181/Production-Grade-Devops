@@ -1,0 +1,194 @@
+# ============================================================
+# OpenTelemetry Collector — Production Config
+#
+# Deployed as DaemonSet (one per node) so pod logs are read
+# from the local node's filesystem.
+#
+# Pipeline:
+#   Receivers  → accept OTLP from app pods, scrape Prometheus, read logs
+#   Processors → enrich with k8s metadata, batch, limit memory
+#   Exporters  → Tempo (traces), Prometheus remote_write (metrics), Loki (logs)
+# ============================================================
+receivers:
+  # ── OTLP receiver: accepts traces + metrics + logs from app ──
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ── Prometheus receiver: scrape /metrics endpoints ───────────
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          static_configs:
+            - targets: ["localhost:8888"]
+
+  # ── File log receiver: read container logs from node ─────────
+  filelog:
+    include:
+      - /var/log/pods/myapp*/*/*.log
+      - /var/log/pods/myapp-staging*/*/*.log
+    start_at: beginning
+    include_file_path: true
+    include_file_name: false
+    operators:
+      # Parse JSON log lines (our app logs structured JSON)
+      - type: json_parser
+        if: 'body matches "^\\{"'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: "%Y-%m-%dT%H:%M:%S.%fZ"
+      # Extract traceId from structured logs
+      - type: move
+        if: 'attributes["traceId"] != nil'
+        from: attributes.traceId
+        to: attributes["traceID"]
+      # Add kubernetes metadata
+      - type: regex_parser
+        regex: '^/var/log/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_[^/]+/(?P<container_name>[^/]+)/'
+        parse_from: attributes["log.file.path"]
+
+  # ── Host metrics: node CPU/memory/disk/network ───────────────
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+      load:
+      filesystem:
+
+processors:
+  # ── Memory limiter: prevent OOM on collector itself ──────────
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # ── Batch: improve throughput, reduce API calls ───────────────
+  batch:
+    send_batch_size: 1000
+    timeout: 5s
+    send_batch_max_size: 2000
+
+  # ── Resource detection: add cloud + k8s metadata ─────────────
+  resourcedetection:
+    detectors: [env, eks, ec2]
+    timeout: 5s
+    override: false
+
+  # ── K8s attributes: enrich with pod/namespace/node labels ────
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    filter:
+      node_from_env_var: K8S_NODE_NAME
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.namespace.name
+        - k8s.node.name
+        - k8s.deployment.name
+        - k8s.replicaset.name
+        - k8s.container.name
+      labels:
+        - tag_name: app
+          key: app
+          from: pod
+        - tag_name: version
+          key: version
+          from: pod
+      annotations:
+        - tag_name: scrape
+          key: prometheus.io/scrape
+          from: pod
+
+  # ── Transform: add environment label to all signals ──────────
+  transform/add_env:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["environment"], "${env:NODE_ENV}")
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["environment"], "${env:NODE_ENV}")
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["environment"], "${env:NODE_ENV}")
+
+exporters:
+  # ── Tempo: traces ─────────────────────────────────────────────
+  otlp/tempo:
+    endpoint: tempo.observability.svc.cluster.local:4317
+    tls:
+      insecure: true
+
+  # ── Prometheus remote_write: metrics ─────────────────────────
+  prometheusremotewrite:
+    endpoint: http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
+    tls:
+      insecure: true
+    resource_to_telemetry_conversion:
+      enabled: true    # convert resource attributes to metric labels
+
+  # ── Loki: logs ────────────────────────────────────────────────
+  loki:
+    endpoint: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+    tls:
+      insecure: true
+    labels:
+      resource_attributes:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.container.name
+        - k8s.node.name
+        - service.name
+        - environment
+
+  # ── Logging: debug collector internals ───────────────────────
+  logging:
+    verbosity: normal
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    # ── Traces pipeline ────────────────────────────────────────
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, batch, resourcedetection, k8sattributes, transform/add_env]
+      exporters:  [otlp/tempo, logging]
+
+    # ── Metrics pipeline ───────────────────────────────────────
+    metrics:
+      receivers:  [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, batch, resourcedetection, k8sattributes, transform/add_env]
+      exporters:  [prometheusremotewrite]
+
+    # ── Logs pipeline ──────────────────────────────────────────
+    logs:
+      receivers:  [otlp, filelog]
+      processors: [memory_limiter, batch, resourcedetection, k8sattributes, transform/add_env]
+      exporters:  [loki, logging]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

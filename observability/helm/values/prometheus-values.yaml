@@ -1,0 +1,85 @@
+# ── kube-prometheus-stack values — extended for observability ─────
+# Extends Project 1 prometheus values with:
+#   - SLO recording rules
+#   - Exemplars (trace ID in metrics)
+#   - Tempo + Loki datasources in Grafana
+#   - Remote write for OTel collector metrics
+
+grafana:
+  enabled: true
+  adminPassword: "changeme-use-secret"
+
+  # ── Datasources: Prometheus + Tempo + Loki correlated ─────────
+  additionalDataSources:
+    - name: Tempo
+      type: tempo
+      url: http://tempo.observability.svc.cluster.local:3100
+      access: proxy
+      jsonData:
+        httpMethod: GET
+        tracesToLogsV2:
+          # Click trace → jump to Loki logs for that traceID
+          datasourceUid: loki
+          filterByTraceID: true
+          filterBySpanID: false
+          tags:
+            - key: service.name
+              value: service_name
+        tracesToMetrics:
+          # Click trace → jump to Prometheus metrics for that service
+          datasourceUid: prometheus
+          tags:
+            - key: service.name
+              value: job
+          queries:
+            - name: Request rate
+              query: sum(rate(http_requests_total{job="$${__tags.job}"}[5m]))
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        search:
+          hide: false
+        lokiSearch:
+          datasourceUid: loki
+
+    - name: Loki
+      type: loki
+      url: http://loki.observability.svc.cluster.local:3100
+      access: proxy
+      jsonData:
+        derivedFields:
+          # Click traceID in a log line → jump to Tempo trace
+          - name: TraceID
+            matcherRegex: '"traceId":"(\w+)"'
+            url: "$${__value.raw}"
+            datasourceUid: tempo
+
+prometheus:
+  prometheusSpec:
+    # ── Enable exemplars (trace IDs in metric data points) ──────
+    enableFeatures:
+      - exemplar-storage
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          resources:
+            requests:
+              storage: 50Gi
+
+    # ── SLO recording rules ────────────────────────────────────
+    # See alerts/slo-rules.yaml for the full rule set
+
+    # ── Remote write (receive from OTel collector) ─────────────
+    remoteWrite:
+      - url: http://localhost:9090/api/v1/write
+        writeRelabelConfigs:
+          - sourceLabels: [__name__]
+            regex: "otel_.*"
+            action: keep
+
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
