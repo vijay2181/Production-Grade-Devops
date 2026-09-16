@@ -1,0 +1,34 @@
+---
+# kubernetes/controller/storageclass.yaml
+# EFS StorageClass for Jenkins home
+# Requires: aws-efs-csi-driver addon installed on the cluster
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap
+  # Populated from Terraform output: efs_file_system_id
+  fileSystemId: fs-REPLACE_WITH_EFS_ID
+  # Populated from Terraform output: efs_access_point_id
+  directoryPerms: "755"
+  basePath: /jenkins
+reclaimPolicy: Retain        # NEVER delete EFS on PVC deletion
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+
+---
+# kubernetes/controller/pdb.yaml
+# PodDisruptionBudget — ensure Jenkins stays up during node drains
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: jenkins-controller-pdb
+  namespace: jenkins
+spec:
+  maxUnavailable: 0   # never voluntarily evict the controller
+  selector:
+    matchLabels:
+      app: jenkins
+      component: controller

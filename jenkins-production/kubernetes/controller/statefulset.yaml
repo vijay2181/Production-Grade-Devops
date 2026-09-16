@@ -1,0 +1,228 @@
+---
+# kubernetes/controller/serviceaccount.yaml
+# IRSA ServiceAccount — controller gets minimal AWS permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-controller
+  namespace: jenkins
+  annotations:
+    # Populated from Terraform output: jenkins_controller_role_arn
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/jenkins-controller-irsa"
+  labels:
+    app: jenkins
+    component: controller
+
+---
+# kubernetes/controller/statefulset.yaml
+# Jenkins Controller as StatefulSet
+#
+# Why StatefulSet:
+#   - Stable pod name: jenkins-0
+#   - PVC bound to the pod's lifecycle (not deleted on pod restart)
+#   - Ordered startup ensures EFS is mounted before Jenkins starts
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jenkins
+  namespace: jenkins
+  labels:
+    app: jenkins
+    component: controller
+spec:
+  serviceName: jenkins
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+      component: controller
+  template:
+    metadata:
+      labels:
+        app: jenkins
+        component: controller
+      annotations:
+        # Prometheus scraping
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/prometheus"
+    spec:
+      serviceAccountName: jenkins-controller
+
+      # Security context — Jenkins runs as UID 1000 (jenkins user)
+      # Matches EFS access point owner UID
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+
+      # Init container: ensure JCasC config is loaded from ConfigMap
+      # before Jenkins starts. Copies to /var/jenkins_home/casc_configs/
+      initContainers:
+        - name: casc-init
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /casc-source/*.yaml /casc-dest/ && echo 'JCasC configs copied'"]
+          volumeMounts:
+            - name: casc-config
+              mountPath: /casc-source
+            - name: casc-dest
+              mountPath: /casc-dest
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+      containers:
+        - name: jenkins
+          # Use a custom image with pinned plugins — never use :lts-jdk17 in prod
+          # Build: docker build -t jenkins-controller:2.440.3 ./docker/
+          image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/jenkins-controller:2.440.3
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: agent
+              containerPort: 50000
+
+          # JCasC environment variables
+          env:
+            # Tell JCasC where to find config files
+            - name: CASC_JENKINS_CONFIG
+              value: /var/jenkins_home/casc_configs
+
+            # Jenkins URL — must match Ingress host
+            - name: JENKINS_URL
+              value: "https://jenkins.company.com"
+
+            # Admin password from Secrets Manager (never hardcoded)
+            # Injected via external-secrets or init script
+            - name: JENKINS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-secrets
+                  key: admin-password
+
+            # GitHub OAuth for SSO
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-secrets
+                  key: github-client-id
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-secrets
+                  key: github-client-secret
+
+            # Slack webhook
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-secrets
+                  key: slack-webhook-url
+
+            # JVM tuning — critical for stability
+            - name: JAVA_OPTS
+              value: >-
+                -Xms1g
+                -Xmx3g
+                -XX:+UseG1GC
+                -XX:MaxGCPauseMillis=200
+                -XX:+ExplicitGCInvokesConcurrent
+                -Djenkins.install.runSetupWizard=false
+                -Dhudson.model.DirectoryBrowserSupport.CSP=
+                -Dorg.jenkinsci.plugins.durabletask.BourneShellScript.HEARTBEAT_CHECK_INTERVAL=300
+
+            # Agent JNLP port
+            - name: JENKINS_AGENT_PORT
+              value: "50000"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+
+          # Liveness: Jenkins UI responds
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+            timeoutSeconds: 10
+
+          # Readiness: Jenkins is fully initialised (not just started)
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 10
+            timeoutSeconds: 5
+
+          # Startup probe: allow up to 10 minutes for initial startup
+          # (plugin loading can be slow on first boot)
+          startupProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            failureThreshold: 60
+            periodSeconds: 10
+
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
+            - name: casc-dest
+              mountPath: /var/jenkins_home/casc_configs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # Jenkins writes to JENKINS_HOME
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: casc-config
+          configMap:
+            name: jenkins-casc-config
+        - name: casc-dest
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+
+      # Prefer spreading controller across AZs (for future HA)
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: jenkins
+              component: controller
+
+  # PVC template — EFS-backed, survives pod restarts
+  volumeClaimTemplates:
+    - metadata:
+        name: jenkins-home
+        annotations:
+          # EFS CSI driver StorageClass
+          volume.kubernetes.io/storage-provisioner: efs.csi.aws.com
+      spec:
+        accessModes: ["ReadWriteMany"]
+        storageClassName: efs-sc
+        resources:
+          requests:
+            storage: 50Gi

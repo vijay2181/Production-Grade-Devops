@@ -1,0 +1,140 @@
+---
+# kubernetes/controller/networkpolicy.yaml
+# Zero-trust network policy for Jenkins namespace
+#
+# Rules:
+#   - Controller accepts traffic from: Ingress ALB, agents (port 50000), Prometheus
+#   - Agents can only reach: controller (50000), ECR, internet (for builds)
+#   - Default deny all ingress + egress
+---
+# Default deny all in jenkins namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: jenkins
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+
+---
+# Allow Jenkins controller to accept HTTP traffic from ALB
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alb-to-controller
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+      component: controller
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: 8080
+      # ALB operates via VPC CIDR — allow from private subnets
+      from:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+
+---
+# Allow agents to connect to controller JNLP port
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agents-to-controller
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+      component: controller
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              jenkins/agent: "true"
+      ports:
+        - port: 50000
+
+---
+# Allow Prometheus to scrape Jenkins metrics
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+      component: controller
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080
+
+---
+# Jenkins controller egress: Kubernetes API (for agent pod management)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-egress-k8s-api
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+      component: controller
+  policyTypes: ["Egress"]
+  egress:
+    # Kubernetes API server
+    - ports:
+        - port: 443
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # GitHub webhooks / SCM polling
+    - ports:
+        - port: 443
+
+---
+# Jenkins agents egress: internet for package downloads + AWS APIs
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress-internet
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      jenkins/agent: "true"
+  policyTypes: ["Egress"]
+  egress:
+    # All internet traffic (npm, docker pull, ECR, Secrets Manager, etc.)
+    - ports:
+        - port: 443
+        - port: 80
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # JNLP back to controller
+    - to:
+        - podSelector:
+            matchLabels:
+              app: jenkins
+              component: controller
+      ports:
+        - port: 50000

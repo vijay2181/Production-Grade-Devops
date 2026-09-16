@@ -1,0 +1,16 @@
+---
+# kubernetes/namespace.yaml
+# Dedicated namespace with Pod Security Admission labels
+# consistent with the security posture from Project 4
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jenkins
+  labels:
+    # Enforce restricted PSA — agent pods must comply
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+    # Kyverno and Gatekeeper still apply from Project 4
+    managed-by: security-stack

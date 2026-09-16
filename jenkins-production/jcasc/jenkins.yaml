@@ -1,0 +1,374 @@
+# =============================================================
+# jcasc/jenkins.yaml — Jenkins Configuration as Code
+#
+# This file configures ALL of Jenkins at startup.
+# No manual UI clicks required or permitted.
+#
+# Environment variables (injected from Kubernetes Secrets):
+#   JENKINS_URL           — public URL of Jenkins
+#   JENKINS_ADMIN_PASSWORD — initial admin password (Secrets Manager)
+#   GITHUB_CLIENT_ID      — GitHub OAuth App client ID
+#   GITHUB_CLIENT_SECRET  — GitHub OAuth App client secret
+#   SLACK_WEBHOOK_URL     — Slack incoming webhook
+#
+# Apply: restart Jenkins controller pod to reload
+# Validate: Manage Jenkins → Configuration as Code → View Configuration
+# =============================================================
+
+jenkins:
+  systemMessage: |
+    Jenkins Production — Managed by Configuration as Code.
+    Do NOT make changes through the UI — they will be overwritten on restart.
+    Submit changes via Git: https://github.com/company/jenkins-config
+
+  # Security realm — GitHub OAuth (no local Jenkins users)
+  # All engineers log in with their GitHub account
+  securityRealm:
+    github:
+      githubWebUri: "https://github.com"
+      githubApiUri: "https://api.github.com"
+      clientID: "${GITHUB_CLIENT_ID}"
+      clientSecret: "${GITHUB_CLIENT_SECRET}"
+      oauthScopes: "read:org,user:email"
+
+  # Authorization — Role-based matrix
+  # Roles defined in jcasc/security.yaml
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "admin"
+            description: "Full Jenkins access"
+            permissions:
+              - "Overall/Administer"
+            entries:
+              - group: "company:jenkins-admins"   # GitHub team
+          - name: "developer"
+            description: "Build and view pipelines"
+            permissions:
+              - "Overall/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+              - "Job/Read"
+              - "View/Read"
+              - "Run/Replay"
+            entries:
+              - group: "company:developers"        # GitHub team
+          - name: "readonly"
+            description: "View only — for stakeholders"
+            permissions:
+              - "Overall/Read"
+              - "Job/Read"
+              - "View/Read"
+            entries:
+              - group: "company:engineering-leads"
+        items:
+          # Prod deployment jobs — only senior engineers
+          - name: "prod-deployers"
+            description: "Can approve and trigger prod deployments"
+            pattern: ".*/prod/.*"
+            permissions:
+              - "Job/Build"
+              - "Job/Cancel"
+              - "Run/Replay"
+            entries:
+              - group: "company:senior-engineers"
+
+  # Global node properties
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: "DOCKER_REGISTRY"
+            value: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+          - key: "AWS_REGION"
+            value: "us-east-1"
+          - key: "ARGOCD_SERVER"
+            value: "argocd.company.com"
+          - key: "KUBE_NAMESPACE_DEV"
+            value: "myapp-dev"
+          - key: "KUBE_NAMESPACE_STAGING"
+            value: "myapp-staging"
+          - key: "KUBE_NAMESPACE_PROD"
+            value: "myapp-prod"
+
+  # Kubernetes cloud — agent pods spawned here
+  clouds:
+    - kubernetes:
+        name: "kubernetes"
+        serverUrl: ""             # empty = use in-cluster config
+        namespace: "jenkins"
+        jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
+        jenkinsTunnel: "jenkins.jenkins.svc.cluster.local:50000"
+        connectTimeout: 60
+        readTimeout: 60
+        containerCap: 50          # max concurrent agent pods
+        maxRequestsPerHost: 32
+        podLabels:
+          - key: "jenkins/agent"
+            value: "true"
+
+        # ── Pod Templates ──────────────────────────────────────────
+        # Each template defines a pod with multiple containers.
+        # Containers share the workspace volume (emptyDir).
+        templates:
+
+          # ── nodejs-agent — default for Node.js services ──────────
+          - name: "nodejs-agent"
+            label: "nodejs"
+            serviceAccount: "jenkins-agent"
+            namespace: "jenkins"
+            nodeUsageMode: EXCLUSIVE
+            idleMinutes: 0          # kill pod immediately when job ends
+            activeDeadlineSeconds: 3600   # kill if job runs > 1 hour
+
+            # Pod-level security context
+            # Must comply with Pod Security Admission (restricted)
+            yaml: |
+              spec:
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                automountServiceAccountToken: true
+
+            containers:
+              # JNLP: required — connects agent to controller
+              - name: "jnlp"
+                image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-3"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "512Mi"
+                alwaysPullImage: true
+
+              # Build container: Node.js 20 LTS
+              - name: "build"
+                image: "node:20-alpine"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "1000m"
+                resourceLimitMemory: "2Gi"
+                alwaysPullImage: true
+                ttyEnabled: true
+                envVars:
+                  - envVar:
+                      key: "NPM_CONFIG_CACHE"
+                      value: "/home/jenkins/.npm"
+                  - envVar:
+                      key: "HOME"
+                      value: "/home/jenkins"
+
+              # Kaniko: builds Docker images without Docker socket
+              # CRITICAL: no privileged mode, no Docker socket mount
+              - name: "kaniko"
+                image: "gcr.io/kaniko-project/executor:v1.21.0-debug"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "1000m"
+                resourceLimitMemory: "2Gi"
+                alwaysPullImage: true
+
+              # Trivy: image vulnerability scanner
+              - name: "trivy"
+                image: "aquasec/trivy:0.50.0"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "1Gi"
+                alwaysPullImage: true
+
+            volumes:
+              # Shared workspace — all containers share this
+              - emptyDirVolume:
+                  memory: false
+                  mountPath: "/workspace"
+
+          # ── java-agent — for Java / Spring Boot services ──────────
+          - name: "java-agent"
+            label: "java"
+            serviceAccount: "jenkins-agent"
+            namespace: "jenkins"
+            nodeUsageMode: EXCLUSIVE
+            idleMinutes: 0
+            activeDeadlineSeconds: 3600
+            yaml: |
+              spec:
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+            containers:
+              - name: "jnlp"
+                image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-3"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "512Mi"
+              - name: "build"
+                image: "eclipse-temurin:21-jdk-alpine"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "500m"
+                resourceRequestMemory: "1Gi"
+                resourceLimitCpu: "2000m"
+                resourceLimitMemory: "4Gi"
+                ttyEnabled: true
+              - name: "kaniko"
+                image: "gcr.io/kaniko-project/executor:v1.21.0-debug"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "1000m"
+                resourceLimitMemory: "2Gi"
+              - name: "trivy"
+                image: "aquasec/trivy:0.50.0"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "1Gi"
+
+          # ── golang-agent ─────────────────────────────────────────
+          - name: "golang-agent"
+            label: "golang"
+            serviceAccount: "jenkins-agent"
+            namespace: "jenkins"
+            nodeUsageMode: EXCLUSIVE
+            idleMinutes: 0
+            activeDeadlineSeconds: 3600
+            yaml: |
+              spec:
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+            containers:
+              - name: "jnlp"
+                image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-3"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "512Mi"
+              - name: "build"
+                image: "golang:1.22-alpine"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "2000m"
+                resourceLimitMemory: "2Gi"
+                ttyEnabled: true
+                envVars:
+                  - envVar:
+                      key: "GOPATH"
+                      value: "/home/jenkins/go"
+                  - envVar:
+                      key: "GOCACHE"
+                      value: "/home/jenkins/.cache/go-build"
+              - name: "kaniko"
+                image: "gcr.io/kaniko-project/executor:v1.21.0-debug"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "1000m"
+                resourceLimitMemory: "2Gi"
+              - name: "trivy"
+                image: "aquasec/trivy:0.50.0"
+                command: "sleep"
+                args: "99d"
+                resourceRequestCpu: "100m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "1Gi"
+
+# ── Global pipeline library ───────────────────────────────────
+unclassified:
+  globalLibraries:
+    libraries:
+      - name: "company-pipeline-lib"
+        defaultVersion: "main"
+        implicit: false     # must be explicitly declared in Jenkinsfile
+        allowVersionOverride: false   # prevents teams from pinning to old broken versions
+        includeInChangesets: true
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "https://github.com/company/jenkins-shared-library.git"
+                credentialsId: "github-app-credentials"
+
+  # Slack notification plugin
+  slackNotifier:
+    teamDomain: "company"
+    tokenCredentialId: "slack-token"
+    room: "#ci-notifications"
+    botUser: true
+    sendAsText: false
+
+  # GitHub plugin config
+  githubPluginConfig:
+    configs:
+      - name: "GitHub"
+        apiUrl: "https://api.github.com"
+        credentialsId: "github-app-credentials"
+        manageHooks: true
+
+  # Build timeout — kill any build running > 60 minutes
+  # Individual pipelines can override with options { timeout(time: 30, unit: 'MINUTES') }
+  buildTimeoutWrapper:
+    operations:
+      - "abort"
+    timeoutMinutes: 60
+
+  # Audit trail — log every Jenkins action
+  auditTrail:
+    logBuildCause: true
+    logBuildTrigger: true
+    loggers:
+      - logFile:
+          count: 10
+          limit: 50
+          log: "/var/jenkins_home/audit/audit.log"
+
+  # Location (used in emails and Slack notifications)
+  location:
+    adminAddress: "jenkins-admin@company.com"
+    url: "${JENKINS_URL}"
+
+  # Timestamper format
+  timestamper:
+    allPipelines: true
+    elapsedTimeFormat: "'<b>'HH:mm:ss.S'</b> '"
+    systemTimeFormat: "'<b>'HH:mm:ss'</b> '"
+
+# ── Tool installations ────────────────────────────────────────
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "git"
+
+  nodejs:
+    installations:
+      - name: "NodeJS-20"
+        properties:
+          - installSource:
+              installers:
+                - nodeJSInstaller:
+                    id: "20.12.0"
+                    npmPackagesRefreshHours: 72

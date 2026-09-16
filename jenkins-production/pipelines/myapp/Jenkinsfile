@@ -1,0 +1,423 @@
+// =============================================================
+// pipelines/myapp/Jenkinsfile
+//
+// Production CI/CD pipeline for myapp (Node.js API)
+// Builds on Project 1 (aws-eks-migration) + Project 2 (ArgoCD)
+//
+// Pipeline flow:
+//   Checkout → [Test + Lint + SAST in parallel] →
+//   Build image → Scan → Sign → Push →
+//   Deploy dev → Integration tests →
+//   Deploy staging → Smoke tests →
+//   [Manual approval] → Deploy prod → Notify
+//
+// Uses: company-pipeline-lib (Shared Library)
+// Agent: nodejs pod template (defined in JCasC)
+// =============================================================
+
+@Library('company-pipeline-lib') _
+
+pipeline {
+  // Run on Kubernetes — agent pod defined in JCasC
+  agent {
+    kubernetes {
+      label 'nodejs'
+      defaultContainer 'build'
+    }
+  }
+
+  // Pipeline-level options
+  options {
+    // Keep last 10 builds (disk management)
+    buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+    // Kill the build if it runs > 45 minutes
+    timeout(time: 45, unit: 'MINUTES')
+    // Timestamps in all build logs
+    timestamps()
+    // ANSI colour codes in logs
+    ansiColor('xterm')
+    // Prevent multiple builds of the same branch simultaneously
+    // (avoids race condition in GitOps repo updates)
+    disableConcurrentBuilds(abortPrevious: true)
+    // Skip default checkout — we do it explicitly with changelog+polling
+    skipDefaultCheckout(true)
+  }
+
+  // Parameters — for manual/parameterised builds
+  parameters {
+    booleanParam(
+      name: 'SKIP_TESTS',
+      defaultValue: false,
+      description: 'Skip test stages (emergency use only — requires justification)'
+    )
+    booleanParam(
+      name: 'FORCE_PROD_DEPLOY',
+      defaultValue: false,
+      description: 'Skip manual approval for prod (requires admin role)'
+    )
+    string(
+      name: 'COVERAGE_THRESHOLD',
+      defaultValue: '75',
+      description: 'Minimum test coverage percentage'
+    )
+  }
+
+  environment {
+    // Application name — matches ArgoCD app name prefix
+    APP_NAME        = 'myapp'
+    // GitOps repository for kustomize image tag updates
+    GITOPS_REPO     = 'company/gitops'
+    // Short git commit for image tagging
+    GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+    // Full image reference (built in Stage 4, used in subsequent stages)
+    IMAGE_TAG       = "${env.DOCKER_REGISTRY}/${env.APP_NAME}:${GIT_COMMIT_SHORT}"
+    // Branch name (cleaned — no origin/ prefix)
+    BRANCH          = sh(script: "echo ${env.GIT_BRANCH} | sed 's|origin/||'", returnStdout: true).trim()
+    // Is this a main branch build? (controls staging + prod deploy)
+    IS_MAIN         = "${env.BRANCH == 'main' ? 'true' : 'false'}"
+  }
+
+  stages {
+
+    // ── Stage 1: Checkout ──────────────────────────────────────
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          // Set build display name for easy identification in UI
+          currentBuild.displayName = "#${env.BUILD_NUMBER} | ${env.BRANCH} | ${env.GIT_COMMIT_SHORT}"
+          currentBuild.description = "Image: ${env.IMAGE_TAG}"
+          notifySlack.started()
+        }
+      }
+    }
+
+    // ── Stage 2: Quality checks (parallel) ────────────────────
+    // All 3 run simultaneously — don't wait for each other.
+    // Total time: max(test_time, lint_time, sast_time) not sum.
+    stage('Quality Checks') {
+      when {
+        not { expression { params.SKIP_TESTS } }
+      }
+      parallel {
+
+        stage('Unit Tests') {
+          steps {
+            runTests(
+              type: 'nodejs',
+              coverage: true,
+              threshold: params.COVERAGE_THRESHOLD.toInteger()
+            )
+          }
+          post {
+            always {
+              // Always publish test results, even on failure
+              junit allowEmptyResults: false, testResults: 'junit.xml'
+            }
+          }
+        }
+
+        stage('Lint') {
+          steps {
+            container('build') {
+              sh '''
+                npm ci --prefer-offline --silent
+                npx eslint src/ \
+                  --format unix \
+                  --max-warnings 0 \
+                  2>&1
+              '''
+            }
+          }
+        }
+
+        stage('SAST — Semgrep') {
+          steps {
+            container('build') {
+              sh '''
+                # Install semgrep (if not in image, add to agent image instead)
+                pip3 install semgrep --quiet 2>/dev/null || \
+                  apk add --no-cache python3 py3-pip && \
+                  pip3 install semgrep --quiet
+
+                # Run OWASP security rules
+                semgrep scan \
+                  --config "p/nodejs" \
+                  --config "p/secrets" \
+                  --config "p/owasp-top-ten" \
+                  --json \
+                  --output semgrep-results.json \
+                  src/ || true
+
+                # Count high/critical findings
+                CRITICAL=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-results.json)
+                echo "Semgrep CRITICAL findings: ${CRITICAL}"
+
+                # Fail on critical security findings
+                if [ "${CRITICAL}" -gt 0 ]; then
+                  jq '.results[] | select(.extra.severity == "ERROR") | .check_id + " | " + .path + ":" + (.start.line|tostring)' semgrep-results.json
+                  exit 1
+                fi
+              '''
+              archiveArtifacts artifacts: 'semgrep-results.json', allowEmptyArchive: true
+            }
+          }
+        }
+      }
+    }
+
+    // ── Stage 3: Build Docker image ────────────────────────────
+    stage('Build Image') {
+      steps {
+        script {
+          buildImage(
+            image: env.APP_NAME,
+            tag: env.GIT_COMMIT_SHORT,
+            dockerfile: 'Dockerfile',
+            context: '.',
+            buildArgs: [
+              "NODE_ENV=production",
+              "BUILD_DATE=${new Date().format('yyyy-MM-dd')}",
+              "GIT_COMMIT=${env.GIT_COMMIT}"
+            ]
+          )
+        }
+      }
+    }
+
+    // ── Stage 4: Image security scan ──────────────────────────
+    stage('Image Scan') {
+      steps {
+        script {
+          securityScan(
+            image: env.IMAGE_TAG,
+            failOnSeverity: 'CRITICAL',
+            ignoreUnfixed: true
+          )
+        }
+      }
+    }
+
+    // ── Stage 5: Sign image ───────────────────────────────────
+    stage('Sign Image') {
+      steps {
+        script {
+          signImage(image: env.IMAGE_TAG)
+        }
+      }
+    }
+
+    // ── Stage 6: Deploy to dev ────────────────────────────────
+    // Always deploy to dev on any branch push
+    stage('Deploy — dev') {
+      steps {
+        script {
+          deployToEKS(
+            environment: 'dev',
+            image: env.IMAGE_TAG,
+            appName: env.APP_NAME,
+            gitopsRepo: env.GITOPS_REPO,
+            waitForHealth: true
+          )
+        }
+      }
+    }
+
+    // ── Stage 7: Integration tests (against dev) ──────────────
+    stage('Integration Tests') {
+      when {
+        not { expression { params.SKIP_TESTS } }
+      }
+      steps {
+        container('build') {
+          sh '''
+            # Wait for dev endpoint to be ready
+            DEV_URL="https://myapp-dev.company.com"
+            for i in $(seq 1 30); do
+              STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${DEV_URL}/health" || echo 000)
+              echo "Health check ${i}/30: ${STATUS}"
+              [ "${STATUS}" = "200" ] && break
+              sleep 5
+            done
+
+            # Run integration test suite against dev
+            DEV_URL="${DEV_URL}" npm run test:integration -- \
+              --ci \
+              --reporters=default \
+              --reporters=jest-junit \
+              --testResultsProcessor=jest-junit \
+              --outputFile=integration-junit.xml
+          '''
+          junit allowEmptyResults: false, testResults: 'integration-junit.xml'
+        }
+      }
+    }
+
+    // ── Stage 8: Deploy to staging (main branch only) ─────────
+    stage('Deploy — staging') {
+      when {
+        expression { env.IS_MAIN == 'true' }
+      }
+      steps {
+        script {
+          deployToEKS(
+            environment: 'staging',
+            image: env.IMAGE_TAG,
+            appName: env.APP_NAME,
+            gitopsRepo: env.GITOPS_REPO,
+            waitForHealth: true
+          )
+        }
+      }
+    }
+
+    // ── Stage 9: Smoke tests (against staging) ────────────────
+    stage('Smoke Tests — staging') {
+      when {
+        expression { env.IS_MAIN == 'true' }
+        not { expression { params.SKIP_TESTS } }
+      }
+      steps {
+        container('build') {
+          sh '''
+            STAGING_URL="https://myapp-staging.company.com"
+
+            # Health check
+            curl -sf "${STAGING_URL}/health" | jq .
+
+            # p95 latency check — must be < 500ms
+            # Run 100 requests and check p95
+            echo "Running latency check..."
+            for i in $(seq 1 100); do
+              curl -sf -o /dev/null -w "%{time_total}\n" "${STAGING_URL}/api/users"
+            done | sort -n | awk '
+              BEGIN { n=0 }
+              { vals[n++] = $1 }
+              END {
+                p95_idx = int(n * 0.95)
+                p95 = vals[p95_idx] * 1000
+                printf "p95 latency: %.0f ms\\n", p95
+                if (p95 > 500) {
+                  printf "FAIL: p95 %.0f ms exceeds 500ms threshold\\n", p95
+                  exit 1
+                }
+                printf "PASS: p95 %.0f ms is within threshold\\n", p95
+              }
+            '
+          '''
+        }
+      }
+    }
+
+    // ── Stage 10: Manual approval gate (prod) ─────────────────
+    stage('Approve — prod') {
+      when {
+        expression { env.IS_MAIN == 'true' }
+        not { expression { params.FORCE_PROD_DEPLOY } }
+      }
+      steps {
+        script {
+          // Notify that approval is pending
+          slackSend(
+            channel: '#deployments',
+            color: '#FFA500',
+            message: """
+*Approval Required — Prod Deploy*
+App: `${env.APP_NAME}:${env.GIT_COMMIT_SHORT}`
+Build: <${env.BUILD_URL}|#${env.BUILD_NUMBER}>
+Approve: <${env.BUILD_URL}input|Click here>
+Auto-cancels in 24 hours.
+            """.stripIndent()
+          )
+
+          // Block pipeline and wait for human approval
+          // Approver's identity is logged in the audit trail
+          timeout(time: 24, unit: 'HOURS') {
+            input(
+              message: "Deploy ${env.APP_NAME}:${env.GIT_COMMIT_SHORT} to PRODUCTION?",
+              ok: 'Deploy to Production',
+              submitterParameter: 'APPROVED_BY',
+              parameters: [
+                text(
+                  name: 'DEPLOY_NOTES',
+                  defaultValue: '',
+                  description: 'Optional: deployment notes / change ticket number'
+                )
+              ]
+            )
+          }
+
+          echo "✅ Approved by: ${env.APPROVED_BY}"
+        }
+      }
+    }
+
+    // ── Stage 11: Deploy to prod ──────────────────────────────
+    stage('Deploy — prod') {
+      when {
+        expression { env.IS_MAIN == 'true' }
+      }
+      steps {
+        script {
+          deployToEKS(
+            environment: 'prod',
+            image: env.IMAGE_TAG,
+            appName: env.APP_NAME,
+            gitopsRepo: env.GITOPS_REPO,
+            waitForHealth: true  // ArgoCD + Argo Rollouts canary (Project 2)
+          )
+        }
+      }
+    }
+
+  } // end stages
+
+  // ── Post-pipeline actions ─────────────────────────────────
+  post {
+    success {
+      script {
+        notifySlack.success()
+        // Tag the image as stable after successful prod deploy
+        if (env.IS_MAIN == 'true') {
+          container('build') {
+            sh """
+              aws ecr batch-get-image \
+                --repository-name ${env.APP_NAME} \
+                --image-ids imageTag=${env.GIT_COMMIT_SHORT} \
+                --region ${env.AWS_REGION} \
+                --query 'images[].imageManifest' \
+                --output text \
+              | aws ecr put-image \
+                --repository-name ${env.APP_NAME} \
+                --image-tag stable \
+                --region ${env.AWS_REGION} \
+                --image-manifest file:///dev/stdin
+            """
+          }
+        }
+      }
+    }
+
+    failure {
+      script {
+        notifySlack.failure()
+      }
+    }
+
+    unstable {
+      script {
+        notifySlack.unstable()
+      }
+    }
+
+    always {
+      // Clean workspace — frees up agent disk
+      cleanWs(
+        cleanWhenAborted: true,
+        cleanWhenFailure: true,
+        cleanWhenSuccess: true,
+        deleteDirs: true
+      )
+    }
+  }
+}

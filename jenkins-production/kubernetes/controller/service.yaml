@@ -1,0 +1,51 @@
+---
+# kubernetes/controller/service.yaml
+# Headless service for StatefulSet DNS + ClusterIP for traffic
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins
+  namespace: jenkins
+  labels:
+    app: jenkins
+    component: controller
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/prometheus"
+spec:
+  # ClusterIP for Ingress → Jenkins HTTP traffic
+  type: ClusterIP
+  selector:
+    app: jenkins
+    component: controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: agent
+      port: 50000
+      targetPort: 50000
+
+---
+# Headless service — required for StatefulSet stable DNS (jenkins-0.jenkins-headless)
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins-headless
+  namespace: jenkins
+  labels:
+    app: jenkins
+    component: controller
+spec:
+  clusterIP: None
+  selector:
+    app: jenkins
+    component: controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: agent
+      port: 50000
+      targetPort: 50000

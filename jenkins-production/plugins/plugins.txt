@@ -1,0 +1,94 @@
+# =============================================================
+# plugins/plugins.txt — Pinned plugin versions
+#
+# ALL plugins are pinned to exact versions.
+# This ensures:
+#   1. Reproducible Jenkins — same plugins every deployment
+#   2. No surprise breakage from auto-updates
+#   3. Audit trail — version bumps are Git commits with context
+#
+# Upgrade process:
+#   1. Update version here
+#   2. Build new Jenkins image: docker build -t jenkins-controller:NEW ./docker/
+#   3. Deploy to staging Jenkins and run test pipelines
+#   4. If green, deploy to production
+#   5. Keep old image tag for quick rollback
+#
+# Check available versions: https://plugins.jenkins.io/
+# =============================================================
+
+# ── Core infrastructure ───────────────────────────────────────
+kubernetes:4029.v5712230ccb_f8
+configuration-as-code:1810.v9b_c30a_249a_4c
+job-dsl:1.87
+
+# ── Pipeline ──────────────────────────────────────────────────
+workflow-aggregator:596.v8c21c963d92d
+workflow-job:1360.v32d133a_94c4b_
+workflow-cps:3894.3896.vca_2b_f5d9e02e
+workflow-multibranch:773.vc4fe1378f1d5
+pipeline-stage-view:2.34
+pipeline-graph-analysis:202.va_d268e64deb_3
+blueocean:1.27.11
+pipeline-build-step:540.vb_e8849e1a_b_d8
+
+# ── SCM ───────────────────────────────────────────────────────
+git:5.2.1
+github:1.37.3.1
+github-branch-source:1787.v8b_8cd49a_f8f1
+github-oauth:597.ve0c3480fcb_d0
+
+# ── Credentials & Security ────────────────────────────────────
+credentials:1319.v7eb_51b_3a_c97b_
+credentials-binding:677.vdc24b_e2d8a_b_0
+role-strategy:727.vd344b_eec783d
+matrix-auth:3.2.2
+github-oauth:597.ve0c3480fcb_d0
+audit-trail:368.v87a_c238fec0e
+antisamy-markup-formatter:162.v0e6ec0fcfcf6
+
+# ── Kubernetes & Cloud ────────────────────────────────────────
+kubernetes-credentials:0.11
+pipeline-aws:1.43
+amazon-ecr:1.114.v64d3f4e10e8b_
+
+# ── Notifications ─────────────────────────────────────────────
+slack:695.va_5ad4f7a_e08a_
+email-ext:2.105
+
+# ── Quality & Analysis ────────────────────────────────────────
+sonar:2.17.2
+
+# ── Build Tools ───────────────────────────────────────────────
+nodejs:1.6.1
+docker-workflow:572.v950f58993843
+timestamper:1.26
+
+# ── UI ────────────────────────────────────────────────────────
+dark-theme:479.v5b_b_5b_9c2c58a_
+simple-theme-plugin:193.v17a_e8e1c3f62
+
+# ── Build Management ──────────────────────────────────────────
+build-timeout:1.32
+throttle-concurrents:2.14
+lockable-resources:1225.v8f7b_7dc8c8a_d
+discard-old-build:1.05
+ws-cleanup:0.46
+ansicolor:1.0.4
+
+# ── Parameterized builds ──────────────────────────────────────
+extended-choice-parameter:346.vd87693c5a_86c
+
+# ── Test results ──────────────────────────────────────────────
+junit:1272.v4f47f0baef58
+test-results-analyzer:0.3.5
+jacoco:3.3.6
+htmlpublisher:1.36
+
+# ── Artifact management ───────────────────────────────────────
+copyartifact:726.v1ea_f64c8a_da_6
+s3:0.1.3.1
+
+# ── Multibranch ───────────────────────────────────────────────
+basic-branch-build-strategies:81.v05e333931c7d
+scm-filter-jervis:0.6.1
