@@ -4,6 +4,7 @@
 > Stack: Jenkins · JCasC · Kubernetes agents · Kaniko · Trivy · Cosign · Shared Library · IRSA · EFS · ArgoCD integration
 
 ---
+# > Enterprise CI Automation 
 
 ## What This Project Demonstrates
 
