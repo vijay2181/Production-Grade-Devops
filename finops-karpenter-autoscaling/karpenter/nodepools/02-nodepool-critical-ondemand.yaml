@@ -1,0 +1,70 @@
+# =============================================================
+# karpenter/nodepools/02-nodepool-critical-ondemand.yaml
+# Tier 1: Core Stateful & Control Workloads
+# Targeted by: ArgoCD, Prometheus, Falco, Kyverno, Jenkins Controller
+# =============================================================
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: critical-ondemand
+  labels:
+    managed-by: karpenter
+spec:
+  template:
+    metadata:
+      labels:
+        nodepool: critical-ondemand
+        tier: system-critical
+        topology.kubernetes.io/network: high-performance
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      # ── Instance Constraints ────────────────────────────────
+      requirements:
+        # STRICT On-Demand only (no Spot risk for core infrastructure)
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+
+        # Support both Graviton (ARM64) and modern Intel/AMD (AMD64)
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+
+        # Modern Graviton3/4 and 6th/7th gen compute/general instance families
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c7g", "m7g", "c6i", "m6i", "c6a", "m6a"]
+
+        # Avoid burstable instances for critical control-plane addons
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m"]
+
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["5"]
+
+        # Spread across all 3 Availability Zones
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+  # ── Disruption & Consolidation Policies ──────────────────────
+  disruption:
+    # Only consolidate when nodes are completely empty (conservative)
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1m
+
+    # Disruption budget: max 1 node disrupted at a time
+    budgets:
+      - nodes: "10%"
+
+  # ── Resource Limits (Cluster Ceiling) ───────────────────────
+  limits:
+    cpu: "100"
+    memory: 400Gi

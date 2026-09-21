@@ -1,0 +1,60 @@
+# =============================================================
+# karpenter/nodepools/01-ec2nodeclass.yaml
+# Karpenter v1.0+ EC2NodeClass Specification
+# Configures AWS-level compute settings: AMI selection, Subnets,
+# Security Groups, Block Device Mappings, and IMDSv2 security.
+# =============================================================
+
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+  labels:
+    managed-by: karpenter
+spec:
+  # ── AMI Selection ───────────────────────────────────────────
+  # Uses official AWS EKS Optimized AL2023 AMI with containerd
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+
+  # ── IAM Role ────────────────────────────────────────────────
+  # Created by Terraform: karpenter_node_role_name
+  role: "myapp-prod-karpenter-node-role"
+
+  # ── Subnet & Security Group Discovery ───────────────────────
+  # Automatically discovers private subnets tagged with karpenter.sh/discovery
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "myapp-prod"
+
+  # Security group attached to EKS nodes
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "myapp-prod"
+
+  # ── EBS Root Storage Hardening ──────────────────────────────
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+
+  # ── Security & Metadata Guardrails (IMDSv2) ─────────────────
+  # Enforce IMDSv2 (Session tokens required, prevents SSRF metadata attacks)
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1    # Prevents pods from accessing EC2 metadata
+    httpTokens: required         # STRICT IMDSv2
+
+  # ── User Tags ───────────────────────────────────────────────
+  tags:
+    Environment: "prod"
+    CostCenter: "PlatformEngineering"
+    ManagedBy: "Karpenter"
+    Cluster: "myapp-prod"

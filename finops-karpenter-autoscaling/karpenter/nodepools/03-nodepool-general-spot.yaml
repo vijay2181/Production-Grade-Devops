@@ -1,0 +1,78 @@
+# =============================================================
+# karpenter/nodepools/03-nodepool-general-spot.yaml
+# Tier 2: Stateless Microservices & Production APIs
+# Targeted by: myapp-prod, API Gateways, Webhooks, Ingestion pods
+# Maximize AWS Spot discount with deep 40+ instance diversification
+# =============================================================
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general-spot
+  labels:
+    managed-by: karpenter
+spec:
+  template:
+    metadata:
+      labels:
+        nodepool: general-spot
+        tier: application-production
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      # ── Broad Instance Diversification (Spot Pool Depth) ───
+      requirements:
+        # Prioritize Spot for 70%+ compute savings (fallback to on-demand if Spot dry)
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+        # Dual architecture: Graviton (cheaper/faster) & AMD64
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+
+        # Comprehensive list of compute, memory, and general purpose families
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [
+            "c7g", "c7a", "c7i",
+            "c6g", "c6a", "c6i",
+            "m7g", "m7a", "m7i",
+            "m6g", "m6a", "m6i",
+            "r7g", "r6g", "t4g"
+          ]
+
+        # Size constraint: 2xlarge down to large (avoids tiny node fragmentation)
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["large", "xlarge", "2xlarge", "4xlarge"]
+
+        # Ensure multi-AZ distribution
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+  # ── Active Defragmentation & Intelligent Downscaling ────────
+  disruption:
+    # Continuously evaluate: can 3 underutilized nodes be replaced by 1 cheaper node?
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+
+    # Disruption budgets: never terminate more than 20% of worker nodes simultaneously
+    budgets:
+      - nodes: "20%"
+        schedule: "0 9-18 * * 1-5"  # Working hours: allow 20% disruption
+        duration: 9h
+      - nodes: "40%"                 # Off-peak hours: aggressive consolidation (40%)
+
+    # Node expiration: automatically recycle nodes older than 14 days (security hygiene)
+    expireAfter: 336h
+
+  # ── Global Capacity Ceiling ─────────────────────────────────
+  limits:
+    cpu: "500"
+    memory: 2000Gi

@@ -1,0 +1,50 @@
+# =============================================================
+# opencost/install.yaml — Production OpenCost Helm Values
+# Real-time EKS Cost Monitoring, AWS Pricing API Integration,
+# & Prometheus FinOps Metrics Exporter.
+# =============================================================
+
+serviceAccount:
+  create: true
+  name: opencost
+  annotations:
+    # Populated from Terraform output: opencost_role_arn
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-prod-opencost-irsa"
+
+opencost:
+  exporter:
+    # Point to Project 3 Prometheus Server
+    prometheus:
+      internal:
+        serviceName: "prometheus-k8s"
+        namespaceName: "monitoring"
+        port: 9090
+
+    # Pricing configuration: dynamically query AWS Pricing API for exact Spot & On-Demand rates
+    cloudProvider: "aws"
+    awsPricingRegion: "us-east-1"
+    
+    # Custom pricing discounts (e.g. AWS Enterprise Discount Program / EDP)
+    customPricing:
+      enabled: true
+      configmapName: "opencost-custom-pricing"
+
+    # Scraping metrics interval
+    scrapeInterval: "30s"
+
+  ui:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+
+# Prometheus ServiceMonitor integration
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  additionalLabels:
+    release: prometheus-stack

@@ -1,0 +1,69 @@
+# =============================================================
+# keda/scaledobjects/02-prometheus-http-scaler.yaml
+# Production KEDA ScaledObject: Prometheus Real-time HTTP RPS Scaler
+# Dynamically scales myapp-prod API based on real Request Per Second
+# pulled directly from Project 3 Prometheus metrics.
+# =============================================================
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: myapp-api-http-scaler
+  namespace: myapp-prod
+  labels:
+    app: myapp
+    tier: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+
+  # Production API maintains minimum 3 pods across 3 AZs
+  minReplicaCount: 3
+  maxReplicaCount: 50
+  cooldownPeriod: 120
+  pollingInterval: 15
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100       # Aggressive scale-up on traffic burst
+              periodSeconds: 15
+            - type: Pods
+              value: 6
+              periodSeconds: 15
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 300 # 5-minute cool-down to prevent thrashing
+          policies:
+            - type: Percent
+              value: 10
+              periodSeconds: 60
+          selectPolicy: Min
+
+  triggers:
+    # Trigger 1: Real-time HTTP Request Rate (RPS)
+    - type: prometheus
+      metadata:
+        serverAddress: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+        metricName: http_requests_per_second
+        # Scale when average RPS exceeds 150 requests/sec per active pod
+        threshold: "150"
+        query: |
+          sum(rate(http_requests_total{namespace="myapp-prod", service="myapp"}[1m]))
+          /
+          count(kube_pod_status_phase{namespace="myapp-prod", phase="Running", pod=~"myapp-.*"})
+
+    # Trigger 2: High p95 Latency Escalation (Defense-in-depth)
+    - type: prometheus
+      metadata:
+        serverAddress: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+        metricName: http_p95_latency_ms
+        threshold: "500"       # If p95 latency exceeds 500ms, force scale-out
+        query: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace="myapp-prod", service="myapp"}[2m])) by (le)) * 1000

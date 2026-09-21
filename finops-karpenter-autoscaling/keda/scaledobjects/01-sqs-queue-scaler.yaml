@@ -1,0 +1,70 @@
+# =============================================================
+# keda/scaledobjects/01-sqs-queue-scaler.yaml
+# Production KEDA ScaledObject: AWS SQS Queue Depth Scaler
+# Dynamically scales asynchronous queue workers from 0 to 40 pods
+# based on real-time AWS SQS backlog.
+# =============================================================
+
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-aws-credentials
+  namespace: myapp-prod
+spec:
+  podIdentity:
+    provider: aws-k8s
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-processor-sqs-scaler
+  namespace: myapp-prod
+  labels:
+    app: order-processor
+    tier: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-processor-worker
+
+  # ── Elastic Scaling Boundaries ──────────────────────────────
+  minReplicaCount: 0          # True scale-to-zero when SQS queue is completely empty
+  maxReplicaCount: 40         # Upper limit during Black Friday / flash traffic bursts
+  cooldownPeriod: 60          # Seconds to wait before scaling down after queue clears
+  pollingInterval: 15         # Poll SQS metric every 15 seconds
+
+  # ── Advanced Scaling Algorithm ──────────────────────────────
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100       # Double replica count immediately if backlog surges
+              periodSeconds: 15
+            - type: Pods
+              value: 8         # Add at least 8 pods at a time
+              periodSeconds: 15
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 120 # Wait 2 minutes of continuous low backlog before downscale
+          policies:
+            - type: Percent
+              value: 20        # Scale down gracefully (max 20% pods at a time)
+              periodSeconds: 30
+          selectPolicy: Min
+
+  # ── Trigger Definition ──────────────────────────────────────
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: keda-aws-credentials
+      metadata:
+        queueURL: "https://sqs.us-east-1.amazonaws.com/123456789012/myapp-order-processing-queue"
+        queueLength: "20"     # Target: 1 pod per 20 messages in queue
+        awsRegion: "us-east-1"
+        scaleOnInFlight: "true"

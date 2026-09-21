@@ -1,0 +1,46 @@
+# =============================================================
+# helm/values/karpenter-values.yaml — Karpenter v1.0+ Controller
+# Helm Values for Karpenter deployment on EKS
+# =============================================================
+
+serviceAccount:
+  create: true
+  name: karpenter
+  annotations:
+    # Populated from Terraform output: karpenter_controller_role_arn
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-prod-karpenter-controller-irsa"
+
+# ── Core Controller Settings ──────────────────────────────────
+settings:
+  clusterName: "myapp-prod"
+  clusterEndpoint: "https://1234567890ABCDEF.gr7.us-east-1.eks.amazonaws.com"
+  interruptionQueue: "myapp-prod-karpenter-interruption"
+  featureGates:
+    spotToSpotConsolidation: true
+    drift: true
+
+# Controller replicas for HA
+replicas: 2
+
+# Resource sizing for Karpenter controller
+controller:
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  # Anti-affinity to ensure controllers run in separate AZs
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: karpenter
+
+  # Run on existing system on-demand node pool (never on dynamic spot)
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand

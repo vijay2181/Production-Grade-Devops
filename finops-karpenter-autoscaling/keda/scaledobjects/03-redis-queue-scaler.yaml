@@ -1,0 +1,47 @@
+# =============================================================
+# keda/scaledobjects/03-redis-queue-scaler.yaml
+# Production KEDA ScaledObject: Redis List Backlog Scaler
+# Dynamically scales cache warming & indexing jobs based on
+# ElastiCache Redis memory backlog from Project 1.
+# =============================================================
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-cache-warmer-scaler
+  namespace: myapp-prod
+  labels:
+    app: cache-warmer
+    tier: background
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: redis-cache-warmer
+
+  minReplicaCount: 0          # Scale to zero when Redis task list is empty
+  maxReplicaCount: 20
+  cooldownPeriod: 60
+  pollingInterval: 10
+
+  triggers:
+    - type: redis
+      metadata:
+        address: "redis-cluster.prod.cache.amazonaws.com:6379"
+        listName: "pending_cache_jobs"
+        listLength: "50"      # 1 pod per 50 queued cache refresh jobs
+        enableTLS: "true"
+      authenticationRef:
+        name: redis-auth-secret
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth-secret
+  namespace: myapp-prod
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: myapp-redis-auth
+      key: auth_token

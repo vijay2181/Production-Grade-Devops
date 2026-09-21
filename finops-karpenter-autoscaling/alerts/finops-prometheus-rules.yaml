@@ -1,0 +1,82 @@
+# =============================================================
+# alerts/finops-prometheus-rules.yaml
+# Production Prometheus Alerting Rules for Cloud FinOps
+# Detects: Unused compute waste, budget anomalies, and Spot capacity drops.
+# =============================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: finops-cost-alerts
+  namespace: monitoring
+  labels:
+    role: alert-rules
+    release: prometheus-stack
+spec:
+  groups:
+    - name: FinOpsCostAnomalies
+      rules:
+
+        # ── 1. Hourly Namespace Cost Spike ────────────────────
+        - alert: HourlyCostSpikeDetected
+          expr: |
+            (
+              sum(rate(node_cpu_hourly_cost[1h])) by (namespace)
+              +
+              sum(rate(node_ram_hourly_cost[1h])) by (namespace)
+            ) > 1.5 * (
+              sum(avg_over_time(node_cpu_hourly_cost[24h])) by (namespace)
+              +
+              sum(avg_over_time(node_ram_hourly_cost[24h])) by (namespace)
+            )
+          for: 15m
+          labels:
+            severity: warning
+            team: platform-finops
+          annotations:
+            summary: "Namespace {{ $labels.namespace }} hourly cost spiked by >50%"
+            description: "Current spend in namespace {{ $labels.namespace }} has surged significantly compared to the 24-hour average baseline."
+
+        # ── 2. Massive Overprovisioning / Compute Waste ────────
+        - alert: SevereComputeOverprovisioning
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{container!=""}[10m])) by (namespace)
+              /
+              sum(kube_pod_container_resource_requests{resource="cpu"}) by (namespace)
+            ) < 0.20
+          for: 4h
+          labels:
+            severity: warning
+            team: platform-finops
+          annotations:
+            summary: "Severe CPU waste in namespace {{ $labels.namespace }}"
+            description: "Namespace {{ $labels.namespace }} is using less than 20% of its requested CPU capacity for over 4 hours. Right-size pod requests."
+
+        # ── 3. Spot Instance Coverage Deficit ─────────────────
+        - alert: SpotCapacityCoverageDeficit
+          expr: |
+            (
+              count(kube_node_labels{label_karpenter_sh_capacity_type="spot"})
+              /
+              count(kube_node_labels{label_karpenter_sh_nodepool="general-spot"})
+            ) < 0.60
+          for: 30m
+          labels:
+            severity: critical
+            team: platform-finops
+          annotations:
+            summary: "Spot instance coverage dropped below 60% in general-spot NodePool"
+            description: "Karpenter was forced to fallback to expensive On-Demand capacity due to regional Spot instance pool exhaustion."
+
+        # ── 4. Karpenter Node Consolidation Failure ───────────
+        - alert: KarpenterConsolidationBlocked
+          expr: |
+            rate(karpenter_nodepool_disruption_evaluations_total{result="disallowed"}[15m]) > 10
+          for: 30m
+          labels:
+            severity: warning
+            team: platform-sre
+          annotations:
+            summary: "Karpenter node consolidation is heavily blocked"
+            description: "PodDisruptionBudgets or strict affinity rules are preventing Karpenter from downscaling/consolidating underutilized nodes."
