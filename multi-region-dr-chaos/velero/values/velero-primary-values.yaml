@@ -1,0 +1,79 @@
+# =============================================================
+# velero/values/velero-primary-values.yaml
+# Production Velero v1.13+ Helm Values for Primary Cluster (us-east-1)
+# Configures: AWS S3 Plugin, EBS CSI Snapshots, & Hourly Backup Schedule
+# =============================================================
+
+configuration:
+  backupStorageLocation:
+    - name: aws-primary-s3
+      provider: aws
+      bucket: "myapp-velero-backups-123456789012-us-east-1"
+      config:
+        region: "us-east-1"
+        s3ForcePathStyle: false
+
+  volumeSnapshotLocation:
+    - name: aws-primary-ebs
+      provider: aws
+      config:
+        region: "us-east-1"
+
+# ── ServiceAccount & IRSA ─────────────────────────────────────
+serviceAccount:
+  server:
+    create: true
+    name: velero
+    annotations:
+      # Populated from Terraform output: velero_primary_role_arn
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-velero-primary-irsa"
+
+# ── Required Velero Plugins ───────────────────────────────────
+initContainers:
+  # Official Velero AWS Plugin (S3 and EBS snapshots)
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.9.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /plugins
+        name: plugins
+
+  # CSI Plugin for native Kubernetes VolumeSnapshot integration
+  - name: velero-plugin-for-csi
+    image: velero/velero-plugin-for-csi:v0.7.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /plugins
+        name: plugins
+
+# ── Feature Flags & CSI Integration ───────────────────────────
+features: EnableCSI
+
+# ── Resource Limits ───────────────────────────────────────────
+resources:
+  requests:
+    cpu: "200m"
+    memory: "256Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# ── Hourly Production Backup Schedule ─────────────────────────
+schedules:
+  hourly-cluster-backup:
+    schedule: "0 * * * *"       # Every hour on the hour
+    useOwnerReferencesInBackup: true
+    template:
+      includedNamespaces:
+        - "myapp-prod"
+        - "monitoring"
+        - "jenkins"
+        - "karpenter"
+      excludedResources:
+        - "events"
+        - "events.events.k8s.io"
+      snapshotVolumes: true
+      ttl: "720h"                # Retain hourly backups for 30 days
+      storageLocation: aws-primary-s3
+      volumeSnapshotLocations:
+        - aws-primary-ebs

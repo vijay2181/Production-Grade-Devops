@@ -1,0 +1,53 @@
+# =============================================================
+# velero/values/velero-secondary-values.yaml
+# Production Velero v1.13+ Helm Values for Secondary DR Cluster (us-west-2)
+# Configured in Read-Only mode to subscribe to Cross-Region Replicated Backups
+# =============================================================
+
+configuration:
+  backupStorageLocation:
+    - name: aws-secondary-dr-s3
+      provider: aws
+      bucket: "myapp-velero-backups-123456789012-us-west-2"
+      accessMode: ReadOnly     # DR cluster does not overwrite primary backup state
+      config:
+        region: "us-west-2"
+        s3ForcePathStyle: false
+
+  volumeSnapshotLocation:
+    - name: aws-secondary-ebs
+      provider: aws
+      config:
+        region: "us-west-2"
+
+serviceAccount:
+  server:
+    create: true
+    name: velero
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/myapp-velero-secondary-irsa"
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.9.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /plugins
+        name: plugins
+
+  - name: velero-plugin-for-csi
+    image: velero/velero-plugin-for-csi:v0.7.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /plugins
+        name: plugins
+
+features: EnableCSI
+
+resources:
+  requests:
+    cpu: "200m"
+    memory: "256Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"

@@ -1,0 +1,110 @@
+# =============================================================
+# chaos/experiments/01-pod-kill-pdb-chaos.yaml
+# Chaos Mesh Experiment 1: Pod Kill & Container Failure
+# Validates that PodDisruptionBudgets (PDBs) prevent service outage
+# when pods are randomly killed in production.
+# =============================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: myapp-api-pod-kill-chaos
+  namespace: myapp-prod
+  labels:
+    tier: chaos-game-day
+spec:
+  action: pod-kill
+  mode: fixed
+  value: "2"                  # Kill exactly 2 pods at random
+  selector:
+    namespaces:
+      - myapp-prod
+    labelSelectors:
+      app: myapp
+  duration: "5m"
+  scheduler:
+    cron: "@every 10m"        # Runs periodically during game days
+
+---
+# =============================================================
+# chaos/experiments/02-network-latency-partition.yaml
+# Chaos Mesh Experiment 2: Network Latency & Packet Loss
+# Injects 200ms latency and 10% packet drop between myapp and PostgreSQL
+# Validates that connection pools & timeouts handle network jitter.
+# =============================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: myapp-db-network-latency-chaos
+  namespace: myapp-prod
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - myapp-prod
+    labelSelectors:
+      app: myapp
+  direction: to
+  target:
+    selector:
+      namespaces:
+        - myapp-prod
+      labelSelectors:
+        app: postgres-proxy
+  delay:
+    latency: "200ms"
+    jitter: "20ms"
+    correlation: "50"
+  loss:
+    loss: "10"               # 10% packet loss
+  duration: "3m"
+
+---
+# =============================================================
+# chaos/experiments/03-az-blackhole-partition.yaml
+# Chaos Mesh Experiment 3: Availability Zone Network Blackhole
+# Simulates full AWS AZ failure (us-east-1a) by dropping all ingress/egress.
+# =============================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: simulate-az-us-east-1a-blackhole
+  namespace: myapp-prod
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces:
+      - myapp-prod
+    nodeSelectors:
+      topology.kubernetes.io/zone: "us-east-1a"
+  direction: both
+  duration: "5m"
+
+---
+# =============================================================
+# chaos/experiments/04-dns-failure-chaos.yaml
+# Chaos Mesh Experiment 4: CoreDNS Latency & Random NXDOMAIN
+# Injects 50% NXDOMAIN error rate on external AWS endpoints
+# =============================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: DNSChaos
+metadata:
+  name: coredns-nxdomain-chaos
+  namespace: myapp-prod
+spec:
+  action: error
+  mode: all
+  selector:
+    namespaces:
+      - myapp-prod
+    labelSelectors:
+      app: myapp
+  patterns:
+    - "*.amazonaws.com"
+    - "redis-cluster.*"
+  duration: "2m"
