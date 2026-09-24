@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-slsa-service
+  namespace: prod-workloads
+  labels:
+    app.kubernetes.io/name: python-slsa-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 5000
+      protocol: TCP
+      name: http
+  selector:
+    app: python-slsa-service

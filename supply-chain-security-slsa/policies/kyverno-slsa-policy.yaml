@@ -1,0 +1,56 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-slsa-image-verification
+  annotations:
+    policies.kyverno.io/title: Enforce Cosign Signature and Syft SBOM Attestations
+    policies.kyverno.io/category: Supply Chain Security (SLSA L3)
+    policies.kyverno.io/severity: High
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Verifies that container images deployed into production namespaces have been signed
+      by trusted Cosign public keys / OIDC issuer, and carry an in-toto SBOM attestation.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              namespaces:
+                - prod-workloads
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERmQy3/hU1qW22x4YjL+B2s8D1kQ7
+                      +fFjH3nK1rYgB6g7N3sF5eC4e+Z6z8yA3m0K5R8n1D7W0p0m0h8sJ9L7A==
+                      -----END PUBLIC KEY-----
+    - name: verify-sbom-attestation
+      match:
+        any:
+          - resources:
+              namespaces:
+                - prod-workloads
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "*"
+          attestations:
+            - predicateType: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keys:
+                        publicKeys: |
+                          -----BEGIN PUBLIC KEY-----
+                          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERmQy3/hU1qW22x4YjL+B2s8D1kQ7
+                          +fFjH3nK1rYgB6g7N3sF5eC4e+Z6z8yA3m0K5R8n1D7W0p0m0h8sJ9L7A==
+                          -----END PUBLIC KEY-----
