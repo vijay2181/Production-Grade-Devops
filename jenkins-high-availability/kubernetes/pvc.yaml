@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-ha-home-pvc
+  namespace: jenkins-ha
+  labels:
+    app.kubernetes.io/name: jenkins-ha
+spec:
+  accessModes:
+    - ReadWriteOnce # In AWS EKS: gp3/EFS; In On-Prem: Ceph/NFS. RWO or RWX
+  resources:
+    requests:
+      storage: 50Gi

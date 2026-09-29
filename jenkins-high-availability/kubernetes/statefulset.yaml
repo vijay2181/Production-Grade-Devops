@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jenkins-ha-controller
+  namespace: jenkins-ha
+  labels:
+    app.kubernetes.io/name: jenkins-ha
+    app.kubernetes.io/component: controller
+spec:
+  serviceName: "jenkins-ha"
+  replicas: 1 # HA Active-Passive pattern: Single writer lock on shared volume, automated fast K8s failover
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jenkins-ha
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jenkins-ha
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: jenkins-ha-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # Pre-installs pinned plugins before controller starts up
+        - name: copy-plugins
+          image: jenkins/jenkins:2.440.3-lts-jdk17
+          command:
+            - "sh"
+            - "-c"
+            - "jenkins-plugin-cli --plugins configuration-as-code:1850.va_e9a_a_c35f299 kubernetes:4289.v106d790d98ca_ git:5.2.2 workflow-aggregator:596.v8c21c963d92d pipeline-stage-view:2.34 prometheus:2.2.0 credentials-binding:681.vf91662a_42e81 timestamper:1.26 ansicolor:1.0.4 ws-cleanup:0.45"
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
+      containers:
+        - name: jenkins
+          image: jenkins/jenkins:2.440.3-lts-jdk17
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CASC_JENKINS_CONFIG
+              value: "/var/jenkins_home/casc_configs/jenkins.yaml"
+            - name: JAVA_OPTS
+              value: "-Djenkins.install.runSetupWizard=false -XX:+UseG1GC -XX:+ExplicitGCInvokesConcurrent -Xms2048m -Xmx2048m"
+            - name: JENKINS_ADMIN_PASSWORD
+              value: "AdminSecurePass123!"
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 50000
+              name: jnlp
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "2000m"
+              memory: "4096Mi"
+          # Automated Liveness and Readiness Probes for Auto-Healing
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
+            - name: jcasc-volume
+              mountPath: /var/jenkins_home/casc_configs
+      volumes:
+        - name: jenkins-home
+          persistentVolumeClaim:
+            claimName: jenkins-ha-home-pvc
+        - name: jcasc-volume
+          configMap:
+            name: jenkins-jcasc-config

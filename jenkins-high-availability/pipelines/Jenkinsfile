@@ -1,0 +1,71 @@
+// ==============================================================================
+// Jenkinsfile — HA Distributed Dynamic Agent Pipeline Demo
+// Demonstrates zero-contention dynamic Kubernetes worker pod execution
+// ==============================================================================
+
+pipeline {
+    agent {
+        kubernetes {
+            label 'k8s-agent'
+            defaultContainer 'builder'
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins: dynamic-ha-agent
+spec:
+  containers:
+  - name: builder
+    image: python:3.11-slim
+    command:
+    - cat
+    tty: true
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "512Mi"
+'''
+        }
+    }
+
+    stages {
+        stage('Dynamic Pod Provisioning & Health') {
+            steps {
+                echo "🚀 Running inside dynamically provisioned ephemeral Kubernetes Agent Pod!"
+                sh '''
+                    echo "Hostname: $(hostname)"
+                    echo "Python Version: $(python3 --version)"
+                    echo "Memory Info:"
+                    free -m || true
+                '''
+            }
+        }
+
+        stage('Parallel Build & Test') {
+            parallel {
+                stage('Test Suite A') {
+                    steps {
+                        echo "🧪 Running Test Suite A..."
+                        sh 'sleep 3 && echo "Suite A Passed"'
+                    }
+                }
+                stage('Test Suite B') {
+                    steps {
+                        echo "🧪 Running Test Suite B..."
+                        sh 'sleep 3 && echo "Suite B Passed"'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "🧹 Build completed! Kubernetes will automatically terminate and delete this agent pod."
+        }
+    }
+}

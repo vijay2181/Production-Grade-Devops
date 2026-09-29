@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-jcasc-config
+  namespace: jenkins-ha
+  labels:
+    app.kubernetes.io/name: jenkins-ha
+data:
+  jenkins.yaml: |
+    jenkins:
+      systemMessage: "🔒 Production HA Jenkins Controller — Managed via Configuration as Code (JCasC)"
+      numExecutors: 0
+      mode: EXCLUSIVE
+      scmCheckoutRetryCount: 3
+      clouds:
+        - kubernetes:
+            name: "kubernetes-ha-agents"
+            serverUrl: "https://kubernetes.default.svc.cluster.local"
+            namespace: "jenkins-ha"
+            jenkinsUrl: "http://jenkins-ha.jenkins-ha.svc.cluster.local:8080"
+            jenkinsTunnel: "jenkins-ha-jnlp.jenkins-ha.svc.cluster.local:50000"
+            containerCapStr: "100"
+            retentionTimeout: 10
+            connectTimeout: 100
+            templates:
+              - name: "jenkins-agent-default"
+                label: "k8s-agent"
+                nodeUsageMode: "NORMAL"
+                idleMinutes: 5
+                workspaceVolume:
+                  emptyDirWorkspaceVolume:
+                    memory: false
+                containers:
+                  - name: "jnlp"
+                    image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-1"
+                    privileged: false
+                    workingDir: "/home/jenkins/agent"
+                    resourceRequestCpu: "200m"
+                    resourceLimitCpu: "1000m"
+                    resourceRequestMemory: "256Mi"
+                    resourceLimitMemory: "1024Mi"
+                  - name: "builder"
+                    image: "python:3.11-slim"
+                    command: "sleep"
+                    args: "99d"
+                    privileged: false
+                    resourceRequestCpu: "500m"
+                    resourceLimitCpu: "2000m"
+                    resourceRequestMemory: "512Mi"
+                    resourceLimitMemory: "2048Mi"
+      securityRealm:
+        local:
+          allowsSignup: false
+          users:
+            - id: "admin"
+              password: "${JENKINS_ADMIN_PASSWORD:-AdminSecurePass123!}"
+      authorizationStrategy:
+        loggedInUsersCanDoAnything:
+          allowAnonymousRead: false
+    unclassified:
+      location:
+        url: "http://localhost:8080/"
+        adminAddress: "devops-admin@company.com"
+      prometheusConfiguration:
+        collectDiskCredentials: true
+        collectNodeStatus: true
+        path: "prometheus"

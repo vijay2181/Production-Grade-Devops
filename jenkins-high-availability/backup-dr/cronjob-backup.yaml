@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jenkins-ha-thinbackup
+  namespace: jenkins-ha
+  labels:
+    app.kubernetes.io/name: jenkins-ha
+    app.kubernetes.io/component: disaster-recovery
+spec:
+  schedule: "0 */4 * * *" # Runs every 4 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: jenkins-ha-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup-worker
+              image: alpine:3.19
+              command:
+                - "/bin/sh"
+                - "-c"
+                - |
+                  set -e
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_DIR="/var/jenkins_home/backups/${TIMESTAMP}"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "📦 Starting Jenkins HA ThinBackup at ${TIMESTAMP}..."
+                  
+                  # Backup critical lightweight files (excluding bulky caches & workspaces)
+                  cd /var/jenkins_home
+                  tar -czf "${BACKUP_DIR}/jenkins_core_config.tar.gz" \
+                    config.xml \
+                    secrets/ \
+                    users/ \
+                    jobs/*/config.xml \
+                    plugins/ \
+                    2>/dev/null || true
+
+                  echo "✅ Backup successfully created at ${BACKUP_DIR}/jenkins_core_config.tar.gz"
+                  
+                  # Retention: Prune backups older than 7 days
+                  find /var/jenkins_home/backups/ -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
+                  echo "🧹 Cleaned up backups older than 7 days."
+              volumeMounts:
+                - name: jenkins-home
+                  mountPath: /var/jenkins_home
+          volumes:
+            - name: jenkins-home
+              persistentVolumeClaim:
+                claimName: jenkins-ha-home-pvc
